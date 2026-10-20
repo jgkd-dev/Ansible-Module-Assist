@@ -1,0 +1,73 @@
+name: Check store login
+
+# Run by hand (Actions tab → Check store login → Run workflow) while setting up
+# publishing. It signs in exactly like release.yml does, prints the ID to add
+# to your Marketplace publisher's Members list, and checks both stores will
+# accept a publish. It never publishes anything.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    environment: marketplace # must match release.yml and the Azure federated credential
+    env:
+      VSCE_PAT: ${{ secrets.VSCE_PAT }}
+      OVSX_PAT: ${{ secrets.OVSX_PAT }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - run: npm ci
+
+      - name: Publisher ID from package.json
+        id: pkg
+        run: echo "publisher=$(node -p 'require("./package.json").publisher')" >> "$GITHUB_OUTPUT"
+
+      # --- VS Code Marketplace: Microsoft Entra ---------------------------------
+      - name: Sign in to Azure as the managed identity
+        if: vars.AZURE_CLIENT_ID != ''
+        uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          allow-no-subscriptions: true
+
+      - name: Marketplace ID for this identity
+        if: vars.AZURE_CLIENT_ID != ''
+        run: |
+          # Azure DevOps keeps its own ID for the identity. This is the one the
+          # Marketplace "Members" page accepts, not the client/object/resource ID.
+          ID=$(az rest -u https://app.vssps.visualstudio.com/_apis/profile/profiles/me \
+                 --resource 499b84ac-1321-427f-aa17-267ca6975798 --query id -o tsv)
+          echo "::notice title=Add this ID to your Marketplace publisher (Members → Add → Contributor)::$ID"
+          echo "### Marketplace member ID" >> "$GITHUB_STEP_SUMMARY"
+          echo "Add \`$ID\` as a **Contributor** under Members on https://marketplace.visualstudio.com/manage/publishers/${{ steps.pkg.outputs.publisher }}" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Can the identity publish as this publisher?
+        if: vars.AZURE_CLIENT_ID != ''
+        run: npx vsce verify-pat --azure-credential "${{ steps.pkg.outputs.publisher }}"
+
+      # --- VS Code Marketplace: token -------------------------------------------
+      - name: Can VSCE_PAT publish as this publisher?
+        if: vars.AZURE_CLIENT_ID == '' && env.VSCE_PAT != ''
+        run: npx vsce verify-pat --pat "$VSCE_PAT" "${{ steps.pkg.outputs.publisher }}"
+
+      # --- Open VSX ---------------------------------------------------------------
+      - name: Can OVSX_PAT publish to this namespace?
+        if: env.OVSX_PAT != ''
+        run: npx ovsx verify-pat "${{ steps.pkg.outputs.publisher }}" -p "$OVSX_PAT"
+
+      - name: Nothing configured
+        if: vars.AZURE_CLIENT_ID == '' && env.VSCE_PAT == '' && env.OVSX_PAT == ''
+        run: |
+          echo "::warning::No store sign-in is set up yet (AZURE_CLIENT_ID/AZURE_TENANT_ID variables, or VSCE_PAT / OVSX_PAT secrets in the marketplace environment)."
+          exit 1

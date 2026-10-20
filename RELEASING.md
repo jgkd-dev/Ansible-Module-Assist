@@ -26,62 +26,44 @@ git commit -am "Release 0.3.1"
 
 ### 1. Protect `main`
 
-Push `main` and open one pull request first, so the `test` check has run once and GitHub knows about it.
+There are two rulesets in `.github/rulesets/`. Import both.
 
-**In the browser:** Settings → Rules → Rulesets → **New ruleset ▾ → Import a ruleset** → choose `.github/rulesets/main.json` → **Create**.
+| Ruleset | What it does |
+|---|---|
+| `main.json` | Blocks deleting and force-pushing `main`. Every change needs a pull request with the `test` check passing on an up-to-date branch and every review conversation resolved. Applies to everyone, including you. |
+| `main-maintainers-only.json` | Only repository **Admins** and **Maintainers** can merge into `main`. Other collaborators can open pull requests but can't merge them. |
+
+Together: a maintainer merges a pull request once its tests pass. Nobody can push straight to `main`, and nobody can merge failing code.
+
+For a personal repo, collaborators only get **Write** access, which means you (the owner, an Admin) are the only one who can merge. The **Maintain** role exists only in repos owned by an organisation.
+
+Approvals are set to **0** because GitHub won't let you approve your own pull request, and the maintainers-only rule already means a maintainer has signed off on every merge. Once you have a second maintainer, raise `required_approving_review_count` in `main.json` to 1.
+
+Push `main` and open one pull request first, so the `test` check has run once and GitHub knows about it. Then import each file:
+
+**In the browser:** Settings → Rules → Rulesets → **New ruleset ▾ → Import a ruleset** → choose the file → **Create**.
 
 **Or with the GitHub CLI:**
 
 ```bash
 gh api repos/{owner}/{repo}/rulesets --method POST --input .github/rulesets/main.json
+gh api repos/{owner}/{repo}/rulesets --method POST --input .github/rulesets/main-maintainers-only.json
 ```
 
-It blocks deleting and force-pushing `main`, requires a pull request with every review conversation resolved, and requires `test` to pass on an up-to-date branch. It requires **0 approvals** because GitHub won't let you approve your own pull request; raise `required_approving_review_count` once someone else works on it.
+People outside the repo can never push to it. They fork it and open a pull request. Before CI runs on a first-time contributor's pull request, GitHub asks you to approve it (Settings → Actions → General → *Approval for running fork pull request workflows*). That pull request's CI never sees your Marketplace secrets.
 
-Nobody can bypass it, including you. To allow yourself an emergency bypass, add yourself under **Bypass list** in the ruleset settings.
+### 2. Extension stores
 
-### 2. VS Code Marketplace
+Publishing to each store is skipped until its sign-in is configured. The GitHub Release is always made.
 
-1. Create a publisher at https://marketplace.visualstudio.com/manage (sign in with a Microsoft account).
-2. Set `"publisher"` in `package.json` to that publisher ID.
-3. Set up sign-in using **one** of the two options below.
+| Store | Configure |
+|---|---|
+| VS Code Marketplace | repository variables `AZURE_CLIENT_ID` + `AZURE_TENANT_ID` (Entra managed identity, federated to the `marketplace` environment), or secret `VSCE_PAT` (stops working 1 Dec 2026) |
+| Open VSX | secret `OVSX_PAT` in the `marketplace` environment |
 
-#### Option A: Microsoft Entra (recommended, and the only option after 1 December 2026)
+Run **Actions → Check store login** to test the sign-ins without publishing.
 
-No secret is stored. GitHub proves its identity to Azure on each run. You'll need an Azure subscription; Azure for Students works, and a managed identity costs nothing.
-
-1. In the Azure portal, create a **user-assigned managed identity**.
-2. In the identity's **Federated credentials**, add a credential:
-   - Scenario: *GitHub Actions deploying Azure resources*
-   - Organization / Repository: your GitHub username / repo name
-   - Entity: **Environment**, name **`marketplace`**
-3. Give the identity the **Reader** role on your subscription or resource group (`azure/login` needs a subscription).
-4. In the Marketplace publisher's **Members** list, add the identity as a **Contributor**. Follow Microsoft's "secure automated publishing with Microsoft Entra ID" steps on the [Publishing Extensions](https://code.visualstudio.com/api/working-with-extensions/publishing-extension) page for this part.
-5. In GitHub, go to Settings → Secrets and variables → Actions → **Variables** and add:
-   - `AZURE_CLIENT_ID`: the identity's client ID
-   - `AZURE_TENANT_ID`: your tenant ID
-   - `AZURE_SUBSCRIPTION_ID`: your subscription ID
-
-#### Option B: Personal access token (quick, but stops working 1 December 2026)
-
-Microsoft retires "global" Azure DevOps tokens, including the kind the Marketplace needs, on 1 December 2026.
-
-1. In Azure DevOps (https://dev.azure.com), go to User settings → Personal access tokens → **New token**.
-   - Organization: **All accessible organizations**
-   - Scopes: Custom defined → **Marketplace → Manage**
-2. In GitHub, go to Settings → Secrets and variables → Actions → **Secrets** and add `VSCE_PAT`.
-
-If both options are set up, Entra is used.
-
-### 3. Open VSX (optional)
-
-Open VSX is the extension store used by VSCodium, Cursor, Windsurf and Gitpod.
-
-1. Sign in at https://open-vsx.org with GitHub and sign the publisher agreement.
-2. Create an access token, then create the namespace once: `npx ovsx create-namespace <publisher> -p <token>`.
-3. Add the GitHub secret `OVSX_PAT`.
-
-### 4. Approve each publish by hand (optional)
+### 3. Approve each publish by hand (optional)
 
 The release job runs in the `marketplace` environment. To approve each publish yourself, go to Settings → Environments → `marketplace` and add yourself as a **Required reviewer**.
 

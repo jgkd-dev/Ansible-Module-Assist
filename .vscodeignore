@@ -6,3 +6,6 @@ tsconfig.json
 **/*.map
 .gitignore
 .vscode/**
+.github/**
+scripts/**
+RELEASING.md

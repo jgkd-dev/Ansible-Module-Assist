@@ -50,25 +50,21 @@ jobs:
         if: steps.version.outputs.release == 'true'
         run: |
           npm ci
-          # Point the Marketplace page at this repo without hardcoding it.
-          npm pkg set repository.type=git repository.url="${{ github.server_url }}/${{ github.repository }}.git"
-          npm pkg set bugs.url="${{ github.server_url }}/${{ github.repository }}/issues"
-          npm pkg set homepage="${{ github.server_url }}/${{ github.repository }}#readme"
+          node scripts/set-repository.mjs
           npx vsce package --no-dependencies --out "ansible-module-assist-${{ steps.version.outputs.version }}.vsix"
 
       # --- VS Code Marketplace -------------------------------------------------
-      # Option A (recommended, required after 1 Dec 2026): Microsoft Entra.
-      #   Set repo variables AZURE_CLIENT_ID, AZURE_TENANT_ID (and AZURE_SUBSCRIPTION_ID).
+      # Option A (recommended, required after 1 Dec 2026): Microsoft Entra
+      #   managed identity. Set variables AZURE_CLIENT_ID and AZURE_TENANT_ID.
       # Option B (stops working 1 Dec 2026): set secret VSCE_PAT.
-      # Neither set: the Marketplace step is skipped and only the GitHub Release is made.
+      # Neither set: the Marketplace step is skipped.
       - name: Sign in to Azure (Entra, no stored secret)
         if: steps.version.outputs.release == 'true' && vars.AZURE_CLIENT_ID != ''
         uses: azure/login@v2
         with:
           client-id: ${{ vars.AZURE_CLIENT_ID }}
           tenant-id: ${{ vars.AZURE_TENANT_ID }}
-          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
-          allow-no-subscriptions: ${{ vars.AZURE_SUBSCRIPTION_ID == '' }}
+          allow-no-subscriptions: true # the identity needs no Azure role
 
       - name: Publish to VS Code Marketplace
         if: steps.version.outputs.release == 'true' && (vars.AZURE_CLIENT_ID != '' || env.VSCE_PAT != '')
@@ -85,7 +81,7 @@ jobs:
       # --- Open VSX (VSCodium, Cursor, Windsurf, Gitpod) — optional --------------
       - name: Publish to Open VSX
         if: steps.version.outputs.release == 'true' && env.OVSX_PAT != ''
-        run: npx --yes ovsx publish "ansible-module-assist-${{ steps.version.outputs.version }}.vsix" --pat "$OVSX_PAT" --skip-duplicate
+        run: npx ovsx publish "ansible-module-assist-${{ steps.version.outputs.version }}.vsix" --pat "$OVSX_PAT" --skip-duplicate
 
       # --- GitHub Release (last, so a failed publish can simply be re-run) ------
       - name: Create GitHub Release
