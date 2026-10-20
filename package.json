@@ -2,7 +2,7 @@
   "name": "ansible-module-assist",
   "displayName": "Ansible Module Assist",
   "description": "Dot-triggered IntelliSense for Ansible playbooks: ansible.builtin, ansible.posix and every installed Galaxy collection (pfsensible.core, community.general, ...), with module options, choices and docs on hover.",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "publisher": "jgkd",
   "license": "MIT",
   "engines": {
@@ -127,5 +127,10 @@
     "esbuild": "^0.28.2",
     "ovsx": "^1.3.0",
     "typescript": "^7.0.2"
+  },
+  "icon": "images/icon.png",
+  "galleryBanner": {
+    "color": "#0C1224",
+    "theme": "dark"
   }
 }
