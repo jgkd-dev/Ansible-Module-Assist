@@ -1,0 +1,54 @@
+name: CI
+
+# Runs on every pull request and push. The `test` job is the required status
+# check in .github/rulesets/main.json, so keep its name in sync if you rename it.
+on:
+  pull_request:
+  push:
+    branches-ignore: [main] # main is covered by release.yml
+  workflow_call: # release.yml reuses this
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # tags, for the version check
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install Ansible and test collections
+        run: |
+          pip install ansible-core
+          ansible-galaxy collection install ansible.posix pfsensible.core
+
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+
+      - name: Build .vsix
+        run: npx vsce package --no-dependencies --allow-missing-repository
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: vsix
+          path: '*.vsix'
+
+      - name: Will merging this release a new version?
+        if: github.event_name == 'pull_request'
+        run: node scripts/version-check.mjs

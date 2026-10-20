@@ -58,6 +58,8 @@ Ansible in a virtualenv? It checks `.venv/bin`, `venv/bin` in the workspace and 
 code --install-extension ansible-module-assist-0.3.0.vsix
 ```
 
+Or download the `.vsix` from the latest [GitHub Release](../../releases/latest).
+
 ## Develop
 
 ```
@@ -68,3 +70,5 @@ npm run package    # build the .vsix
 ```
 
 Press F5 in VS Code with this folder open to launch an Extension Development Host.
+
+Releases are automatic when a version bump is merged to `main`. See [RELEASING.md](RELEASING.md).

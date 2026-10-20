@@ -1,0 +1,110 @@
+name: Release
+
+# On every merge to main: if package.json's version has no git tag yet, test,
+# build the .vsix, publish to the VS Code Marketplace (and Open VSX if set up),
+# then create a GitHub Release with the .vsix attached.
+# A merge without a version bump runs the tests and stops there.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: # re-run by hand from the Actions tab
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    uses: ./.github/workflows/ci.yml
+
+  release:
+    needs: test
+    runs-on: ubuntu-latest
+    environment: marketplace # optional: add reviewers to it to approve each publish
+    permissions:
+      contents: write # create the tag + release
+      id-token: write # Microsoft Entra (OIDC) sign-in for the Marketplace
+    env:
+      # Secrets can't be tested in `if:` directly, so expose them as env vars.
+      VSCE_PAT: ${{ secrets.VSCE_PAT }}
+      OVSX_PAT: ${{ secrets.OVSX_PAT }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Is this a new version?
+        id: version
+        run: node scripts/version-check.mjs --output
+
+      - uses: actions/setup-node@v4
+        if: steps.version.outputs.release == 'true'
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Build .vsix
+        if: steps.version.outputs.release == 'true'
+        run: |
+          npm ci
+          # Point the Marketplace page at this repo without hardcoding it.
+          npm pkg set repository.type=git repository.url="${{ github.server_url }}/${{ github.repository }}.git"
+          npm pkg set bugs.url="${{ github.server_url }}/${{ github.repository }}/issues"
+          npm pkg set homepage="${{ github.server_url }}/${{ github.repository }}#readme"
+          npx vsce package --no-dependencies --out "ansible-module-assist-${{ steps.version.outputs.version }}.vsix"
+
+      # --- VS Code Marketplace -------------------------------------------------
+      # Option A (recommended, required after 1 Dec 2026): Microsoft Entra.
+      #   Set repo variables AZURE_CLIENT_ID, AZURE_TENANT_ID (and AZURE_SUBSCRIPTION_ID).
+      # Option B (stops working 1 Dec 2026): set secret VSCE_PAT.
+      # Neither set: the Marketplace step is skipped and only the GitHub Release is made.
+      - name: Sign in to Azure (Entra, no stored secret)
+        if: steps.version.outputs.release == 'true' && vars.AZURE_CLIENT_ID != ''
+        uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+          allow-no-subscriptions: ${{ vars.AZURE_SUBSCRIPTION_ID == '' }}
+
+      - name: Publish to VS Code Marketplace
+        if: steps.version.outputs.release == 'true' && (vars.AZURE_CLIENT_ID != '' || env.VSCE_PAT != '')
+        env:
+          USE_AZURE: ${{ vars.AZURE_CLIENT_ID != '' }}
+        run: |
+          VSIX="ansible-module-assist-${{ steps.version.outputs.version }}.vsix"
+          if [ "$USE_AZURE" = "true" ]; then
+            npx vsce publish --packagePath "$VSIX" --azure-credential --skip-duplicate
+          else
+            npx vsce publish --packagePath "$VSIX" --pat "$VSCE_PAT" --skip-duplicate
+          fi
+
+      # --- Open VSX (VSCodium, Cursor, Windsurf, Gitpod) — optional --------------
+      - name: Publish to Open VSX
+        if: steps.version.outputs.release == 'true' && env.OVSX_PAT != ''
+        run: npx --yes ovsx publish "ansible-module-assist-${{ steps.version.outputs.version }}.vsix" --pat "$OVSX_PAT" --skip-duplicate
+
+      # --- GitHub Release (last, so a failed publish can simply be re-run) ------
+      - name: Create GitHub Release
+        if: steps.version.outputs.release == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ steps.version.outputs.tag }}" \
+            "ansible-module-assist-${{ steps.version.outputs.version }}.vsix" \
+            --title "${{ steps.version.outputs.tag }}" \
+            --target "${{ github.sha }}" \
+            --generate-notes
+
+      - name: Summary
+        if: always()
+        run: |
+          if [ "${{ steps.version.outputs.release }}" = "true" ]; then
+            echo "### Released ${{ steps.version.outputs.tag }}" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "### No release: ${{ steps.version.outputs.tag }} already exists" >> "$GITHUB_STEP_SUMMARY"
+            echo "Bump the version in a PR (\`npm run bump:patch\`) to publish." >> "$GITHUB_STEP_SUMMARY"
+          fi

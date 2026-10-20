@@ -40,7 +40,7 @@
       },
       {
         "command": "ansibleModules.insertModule",
-        "title": "Insert module\u2026",
+        "title": "Insert module…",
         "category": "Ansible Modules"
       }
     ],
@@ -112,7 +112,10 @@
     "typecheck": "tsc --noEmit",
     "test": "esbuild test/run.ts --bundle --outfile=out/test.js --platform=node --format=cjs && node out/test.js",
     "package": "npm run typecheck && npm run build && vsce package --no-dependencies --allow-missing-repository",
-    "vscode:prepublish": "npm run build"
+    "vscode:prepublish": "npm run build",
+    "bump:patch": "npm version patch --no-git-tag-version",
+    "bump:minor": "npm version minor --no-git-tag-version",
+    "bump:major": "npm version major --no-git-tag-version"
   },
   "dependencies": {
     "yaml": "^2.9.1"
