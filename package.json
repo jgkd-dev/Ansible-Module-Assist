@@ -1,0 +1,127 @@
+{
+  "name": "ansible-module-assist",
+  "displayName": "Ansible Module Assist",
+  "description": "Dot-triggered IntelliSense for Ansible playbooks: ansible.builtin, ansible.posix and every installed Galaxy collection (pfsensible.core, community.general, ...), with module options, choices and docs on hover.",
+  "version": "0.3.0",
+  "publisher": "jgkd",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Programming Languages",
+    "Snippets",
+    "Other"
+  ],
+  "keywords": [
+    "ansible",
+    "playbook",
+    "galaxy",
+    "collections",
+    "intellisense",
+    "yaml"
+  ],
+  "main": "./dist/extension.js",
+  "activationEvents": [
+    "onLanguage:yaml",
+    "onLanguage:ansible"
+  ],
+  "contributes": {
+    "commands": [
+      {
+        "command": "ansibleModules.refresh",
+        "title": "Re-scan installed collections",
+        "category": "Ansible Modules"
+      },
+      {
+        "command": "ansibleModules.showCollections",
+        "title": "Show installed collections",
+        "category": "Ansible Modules"
+      },
+      {
+        "command": "ansibleModules.insertModule",
+        "title": "Insert module\u2026",
+        "category": "Ansible Modules"
+      }
+    ],
+    "configuration": {
+      "title": "Ansible Module Assist",
+      "properties": {
+        "ansibleModules.ansibleBinPath": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Folder containing `ansible`, `ansible-galaxy` and `ansible-doc` (e.g. a virtualenv `bin` folder). Leave empty to use PATH, `~/.local/bin` and `.venv/bin` in the workspace."
+        },
+        "ansibleModules.collectionsPaths": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "markdownDescription": "Extra collection paths to scan, in addition to `ansible-galaxy collection list`, `ansible.cfg`, `ANSIBLE_COLLECTIONS_PATH`, `~/.ansible/collections` and `./collections`."
+        },
+        "ansibleModules.useAnsibleDoc": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Fall back to `ansible-doc` when a module's documentation can't be read from its source file (rare). Docs are read from the module files first because that's instant."
+        },
+        "ansibleModules.insertRequiredOptions": {
+          "type": "boolean",
+          "default": true,
+          "description": "When a module is picked, insert its required options as a snippet."
+        },
+        "ansibleModules.inlineSuggestions": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Show module parameters as grey inline ghost text (like inline AI suggestions): the next required parameter on a new line, partial parameter names, and default/choice values. Press `Tab` to accept."
+        },
+        "ansibleModules.suggestShortNames": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Typing a bare module name (e.g. `copy`) offers the full name (`ansible.builtin.copy`)."
+        },
+        "ansibleModules.suggestTaskKeywords": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Also suggest task keywords such as `name`, `when`, `register`, `loop`, `become`."
+        },
+        "ansibleModules.includeDeprecated": {
+          "type": "boolean",
+          "default": false,
+          "markdownDescription": "Include deprecated modules (files starting with `_`)."
+        },
+        "ansibleModules.activation": {
+          "type": "string",
+          "enum": [
+            "auto",
+            "always"
+          ],
+          "default": "auto",
+          "enumDescriptions": [
+            "Only in YAML files that look like Ansible (tasks/, roles/, playbooks, files with hosts:/tasks:/- name:)",
+            "In every YAML file"
+          ],
+          "description": "Which YAML files get suggestions."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "build": "esbuild src/extension.ts --bundle --outfile=dist/extension.js --external:vscode --format=cjs --platform=node --target=node18 --minify-syntax",
+    "watch": "npm run build -- --watch --sourcemap",
+    "typecheck": "tsc --noEmit",
+    "test": "esbuild test/run.ts --bundle --outfile=out/test.js --platform=node --format=cjs && node out/test.js",
+    "package": "npm run typecheck && npm run build && vsce package --no-dependencies --allow-missing-repository",
+    "vscode:prepublish": "npm run build"
+  },
+  "dependencies": {
+    "yaml": "^2.9.1"
+  },
+  "devDependencies": {
+    "@types/node": "^20.19.43",
+    "@types/vscode": "^1.85.0",
+    "@vscode/vsce": "^4.0.0",
+    "esbuild": "^0.28.2",
+    "typescript": "^7.0.2"
+  }
+}
