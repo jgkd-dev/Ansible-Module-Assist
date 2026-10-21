@@ -2,7 +2,7 @@ import * as vscode from 'vscode';
 import { ModuleIndex, ModuleInfo, CollectionInfo } from './indexer';
 import { planGhost } from './ghost';
 import { DocProvider, ModuleDoc, OptionDoc, docsUrl, galaxyUrl } from './docs';
-import { RoleIndex, RoleInfo } from './roles';
+import { RoleIndex, RoleInfo, RoleSpec } from './roles';
 import { LEGACY_KEYS, LEGACY_SECTION, SCOPES, SECTION, pickSetting } from './settings';
 import {
   ROLE_KEYWORDS,
@@ -15,6 +15,7 @@ import {
   looksLikeAnsible,
   roleContext,
   roleReferenceAt,
+  roleVarsBlock,
   siblingKeys,
   valueTokenBeforeCursor,
 } from './context';
@@ -30,6 +31,7 @@ const SELECTOR: vscode.DocumentSelector = [
 
 const CMD_RETRIGGER = 'assistable.retrigger';
 const CMD_MODULE_INSERTED = 'assistable.moduleInserted';
+const CMD_ROLE_INSERTED = 'assistable.roleInserted';
 
 let index: ModuleIndex;
 let roles: RoleIndex;
@@ -126,9 +128,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
   const rescanRoles = debounce(() => void ready.then(rebuildRoles), 500);
   const rescanAll = debounce(() => void rebuild(), 300);
-  // New or removed roles, and edits to their meta/ (description, argument specs).
+  // New or removed roles, and edits to their meta/ (description, argument specs) and defaults/.
   const roleDirs = vscode.workspace.createFileSystemWatcher('**/roles/{*,*/*}', false, true, false);
-  const roleMeta = vscode.workspace.createFileSystemWatcher('**/roles/*/meta/*.{yml,yaml}');
+  const roleMeta = vscode.workspace.createFileSystemWatcher('**/roles/*/{meta,defaults}/**/*.{yml,yaml}');
   for (const w of [roleDirs, roleMeta]) {
     w.onDidCreate(rescanRoles);
     w.onDidDelete(rescanRoles);
@@ -144,6 +146,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     vscode.languages.registerInlineCompletionItemProvider(SELECTOR, new AnsibleInlineProvider()),
     vscode.commands.registerCommand(CMD_RETRIGGER, () => vscode.commands.executeCommand('editor.action.triggerSuggest')),
     vscode.commands.registerCommand(CMD_MODULE_INSERTED, moduleInserted),
+    vscode.commands.registerCommand(CMD_ROLE_INSERTED, roleInserted),
     vscode.window.onDidChangeActiveTextEditor(updateStatusVisibility),
     vscode.workspace.onDidChangeConfiguration((e) => {
       if (e.affectsConfiguration(SECTION) || e.affectsConfiguration(LEGACY_SECTION)) rescanAll();
@@ -208,6 +211,31 @@ function docLines(doc: vscode.TextDocument): string[] {
   return doc.getText().split(/\r?\n/);
 }
 
+/**
+ * Docs for the block opened by `key` on line `keyLine`: a module's options,
+ * or, for a `vars:` passed to a role, that role's variables.
+ */
+async function blockDoc(doc: vscode.TextDocument, lines: string[], key: string, keyLine?: number): Promise<ModuleDoc | undefined> {
+  if (key === 'vars') {
+    if (keyLine === undefined || !setting('suggestRoleVariables', true)) return undefined;
+    const block = roleVarsBlock(lines, keyLine);
+    const role = block && roles.resolve(block.role, docPath(doc));
+    const spec = role && roles.spec(role, block.entryPoint);
+    return spec && specDoc(role.name, spec);
+  }
+  const mod = await index.resolveModule(key);
+  return mod && docs.get(mod);
+}
+
+/** A role's variables in the shape of module docs, so options code works on both. */
+function specDoc(roleName: string, spec: RoleSpec): ModuleDoc {
+  return { fqcn: roleName, shortDescription: spec.shortDescription, description: spec.description, options: spec.options, source: spec.source };
+}
+
+function isRoleDoc(d: ModuleDoc): boolean {
+  return d.source === 'argument_specs' || d.source === 'defaults';
+}
+
 // ---------------------------------------------------------------------------
 // Completion
 // ---------------------------------------------------------------------------
@@ -237,7 +265,7 @@ class AnsibleCompletionProvider implements vscode.CompletionItemProvider {
     // 1) value position: `state: |` → choices of the option
     const val = valueTokenBeforeCursor(prefix);
     if (val) {
-      return this.valueCompletions(lines, pos, val.key, val.keyCol, val.dashCol, val.valueStart);
+      return this.valueCompletions(doc, lines, pos, val.key, val.keyCol, val.dashCol, val.valueStart);
     }
     if (isSpace) return undefined;
 
@@ -253,8 +281,8 @@ class AnsibleCompletionProvider implements vscode.CompletionItemProvider {
 
     // Module options: we're inside `ansible.builtin.copy:` → suggest its parameters
     if (enclosing.mapParentKey && !tok.token.includes('.')) {
-      const mod = await index.resolveModule(enclosing.mapParentKey);
-      if (mod) return this.optionCompletions(doc, lines, pos, tok.start, mod, range, hasColonAfter);
+      const d = await blockDoc(doc, lines, enclosing.mapParentKey, enclosing.mapParentLine);
+      if (d) return this.optionCompletions(doc, lines, pos, tok.start, d, range, hasColonAfter);
       return undefined;
     }
 
@@ -389,12 +417,10 @@ class AnsibleCompletionProvider implements vscode.CompletionItemProvider {
     lines: string[],
     pos: vscode.Position,
     keyCol: number,
-    mod: ModuleInfo,
+    d: ModuleDoc,
     range: vscode.Range,
     hasColonAfter: boolean,
   ): Promise<vscode.CompletionItem[]> {
-    const d = await docs.get(mod);
-    if (!d) return [];
     const present = siblingKeys(lines, pos.line, keyCol);
     const items: vscode.CompletionItem[] = [];
     const unit = indentUnit(doc);
@@ -407,8 +433,8 @@ class AnsibleCompletionProvider implements vscode.CompletionItemProvider {
       item.range = range;
       item.filterText = [opt.name, ...opt.aliases].join(' ');
       item.sortText = `${opt.required ? '0' : '1'}_${opt.name}`;
-      item.documentation = optionMarkdown(mod.fqcn, opt);
-      item.detail = `${mod.fqcn} option`;
+      item.documentation = optionMarkdown(d, opt);
+      item.detail = `${d.fqcn} ${isRoleDoc(d) ? 'variable' : 'option'}`;
       if (hasColonAfter) {
         item.insertText = opt.name;
       } else {
@@ -421,6 +447,7 @@ class AnsibleCompletionProvider implements vscode.CompletionItemProvider {
   }
 
   private async valueCompletions(
+    doc: vscode.TextDocument,
     lines: string[],
     pos: vscode.Position,
     key: string,
@@ -430,9 +457,7 @@ class AnsibleCompletionProvider implements vscode.CompletionItemProvider {
   ): Promise<vscode.CompletionItem[] | undefined> {
     const enclosing = findEnclosing(lines, pos.line, keyCol, dashCol);
     if (!enclosing.mapParentKey) return undefined;
-    const mod = await index.resolveModule(enclosing.mapParentKey);
-    if (!mod) return undefined;
-    const d = await docs.get(mod);
+    const d = await blockDoc(doc, lines, enclosing.mapParentKey, enclosing.mapParentLine);
     const opt = d && (d.options[key] ?? Object.values(d.options).find((o) => o.aliases.includes(key)));
     if (!opt) return undefined;
     const values = opt.choices?.length ? opt.choices : opt.type === 'bool' ? [true, false] : [];
@@ -499,6 +524,7 @@ function roleCompletions(doc: vscode.TextDocument, pos: vscode.Position, rc: Rol
     item.range = range;
     item.sortText = `${sort}_${role.name}`;
     (item as any).roleInfo = role;
+    if (rc.entry && !hasColonAfter) item.command = { title: 'role inserted', command: CMD_ROLE_INSERTED, arguments: [role.name, rc.keyCol] };
     items.push(item);
   };
   // Standalone roles always show: Galaxy role names like `geerlingguy.docker` contain a dot too.
@@ -603,6 +629,36 @@ async function moduleInserted(fqcn: string): Promise<void> {
   await vscode.commands.executeCommand('editor.action.triggerSuggest');
 }
 
+/**
+ * After a role is picked in a `roles:` entry: add `vars:` with the variables its
+ * argument specs mark required, as tab stops. Nothing for roles without them.
+ */
+async function roleInserted(name: string, keyCol: number): Promise<void> {
+  const editor = vscode.window.activeTextEditor;
+  if (!editor || !setting('insertRequiredOptions', true) || !setting('suggestRoleVariables', true)) return;
+  const doc = editor.document;
+  const pos = editor.selection.active;
+  const lineText = doc.lineAt(pos.line).text;
+  if (lineText.slice(pos.character).trim()) return; // re-editing a role in the middle of a line
+  if (siblingKeys(docLines(doc), pos.line, keyCol).has('vars')) return;
+  const role = roles.resolve(name, docPath(doc));
+  const spec = role && roles.spec(role);
+  const required = spec ? Object.values(spec.options).filter((o) => o.required) : [];
+  if (!required.length) return;
+  // insertSnippet re-indents new lines to the current line's indentation, so indent relative to it.
+  const lead = /^\s*/.exec(lineText)![0].length;
+  const indent = ' '.repeat(Math.max(0, keyCol - lead));
+  const s = new vscode.SnippetString();
+  s.appendText(`\n${indent}vars:`);
+  for (const o of required) {
+    s.appendText(`\n${indent}${' '.repeat(indentUnit(doc))}${o.name}: `);
+    if (o.choices?.length) s.appendChoice(o.choices.map(String));
+    else s.appendPlaceholder(o.name);
+  }
+  s.appendTabstop(0);
+  await editor.insertSnippet(s, pos, { undoStopBefore: false, undoStopAfter: true });
+}
+
 // ---------------------------------------------------------------------------
 // Inline (ghost text) parameter suggestions
 // ---------------------------------------------------------------------------
@@ -616,16 +672,8 @@ class AnsibleInlineProvider implements vscode.InlineCompletionItemProvider {
   ): Promise<vscode.InlineCompletionItem[] | undefined> {
     if (!setting('inlineSuggestions', true) || !isActiveFor(doc)) return undefined;
     await ready;
-    const ghost = await planGhost(
-      docLines(doc),
-      pos.line,
-      pos.character,
-      async (key) => {
-        const mod = await index.resolveModule(key);
-        return mod ? docs.get(mod) : undefined;
-      },
-      indentUnit(doc),
-    );
+    const lines = docLines(doc);
+    const ghost = await planGhost(lines, pos.line, pos.character, (key, keyLine) => blockDoc(doc, lines, key, keyLine), indentUnit(doc));
     if (!ghost || token.isCancellationRequested) return undefined;
     return [new vscode.InlineCompletionItem(ghost.text, new vscode.Range(pos.line, ghost.start, pos.line, pos.character))];
   }
@@ -659,12 +707,9 @@ class AnsibleHoverProvider implements vscode.HoverProvider {
     // Hovering an option inside a module block
     const enclosing = findEnclosing(lines, pos.line, li.keyCol, li.dashCol);
     if (enclosing.mapParentKey) {
-      const parent = await index.resolveModule(enclosing.mapParentKey);
-      if (parent) {
-        const d = await docs.get(parent);
-        const opt = d && (d.options[word] ?? Object.values(d.options).find((o) => o.aliases.includes(word)));
-        if (opt) return new vscode.Hover(optionMarkdown(parent.fqcn, opt), range);
-      }
+      const d = await blockDoc(doc, lines, enclosing.mapParentKey, enclosing.mapParentLine);
+      const opt = d && (d.options[word] ?? Object.values(d.options).find((o) => o.aliases.includes(word)));
+      if (opt) return new vscode.Hover(optionMarkdown(d, opt), range);
     }
 
     // Hovering a module key
@@ -705,11 +750,13 @@ function roleMarkdown(role: RoleInfo): vscode.MarkdownString {
   md.appendMarkdown(`**${role.name}** _role_`);
   if (d.description) md.appendMarkdown(` — ${d.description}`);
   md.appendMarkdown('\n\n');
-  const opts = Object.values(d.options);
+  const spec = roles.spec(role);
+  const opts = spec ? Object.values(spec.options) : [];
   const required = opts.filter((o) => o.required).map((o) => `\`${o.name}\``);
   if (required.length) md.appendMarkdown(`**Required variables:** ${required.join(', ')}\n\n`);
   const optional = opts.filter((o) => !o.required).map((o) => `\`${o.name}\``);
-  if (optional.length) md.appendMarkdown(`**Variables:** ${optional.slice(0, 40).join(', ')}${optional.length > 40 ? ', …' : ''}\n\n`);
+  const label = spec?.source === 'defaults' ? 'Variables (from `defaults/main.yml`)' : 'Variables';
+  if (optional.length) md.appendMarkdown(`**${label}:** ${optional.slice(0, 40).join(', ')}${optional.length > 40 ? ', …' : ''}\n\n`);
   if (d.dependencies.length) md.appendMarkdown(`**Depends on:** ${d.dependencies.map((x) => `\`${x}\``).join(', ')}\n\n`);
   const facts = [roleSourceLabel(role), d.author ? `by ${d.author}` : ''].filter(Boolean).join(' · ');
   md.appendMarkdown(`_${facts}_ · \`${vscode.workspace.asRelativePath(role.root)}\``);
@@ -741,7 +788,7 @@ function moduleMarkdown(mod: ModuleInfo, d: ModuleDoc | undefined, compact: bool
   return md;
 }
 
-function optionMarkdown(fqcn: string, opt: OptionDoc): vscode.MarkdownString {
+function optionMarkdown(owner: ModuleDoc, opt: OptionDoc): vscode.MarkdownString {
   const md = new vscode.MarkdownString(undefined, true);
   const typeStr = opt.type ? (opt.elements ? `${opt.type} of ${opt.elements}` : opt.type) : 'any';
   md.appendMarkdown(`**${opt.name}** \`${typeStr}\`${opt.required ? ' · **required**' : ''}\n\n`);
@@ -750,7 +797,8 @@ function optionMarkdown(fqcn: string, opt: OptionDoc): vscode.MarkdownString {
   if (opt.default !== undefined && opt.default !== null) md.appendMarkdown(`**Default:** \`${JSON.stringify(opt.default)}\`\n\n`);
   if (opt.aliases.length) md.appendMarkdown(`**Aliases:** ${opt.aliases.map((a) => `\`${a}\``).join(', ')}\n\n`);
   if (opt.suboptions) md.appendMarkdown(`**Suboptions:** ${Object.keys(opt.suboptions).map((k) => `\`${k}\``).join(', ')}\n\n`);
-  md.appendMarkdown(`_${fqcn}_`);
+  if (owner.source === 'defaults') md.appendMarkdown(`_${owner.fqcn}_ · from \`defaults/main.yml\` (the role has no argument specs, so this may be internal)`);
+  else md.appendMarkdown(`_${owner.fqcn}${isRoleDoc(owner) ? ' variable' : ''}_`);
   return md;
 }
 
@@ -824,11 +872,27 @@ async function insertRoleCommand(): Promise<void> {
   const name = picked.role.name;
   if (rc?.kind === 'roleName') {
     const range = new vscode.Range(pos.line, rc.start, pos.line, pos.character);
-    await editor.edit((b) => b.replace(range, (rc.asKey ? 'role: ' : '') + name));
+    await editor.edit((b) => b.replace(range, (rc.asKey ? 'role: ' : '') + name), { undoStopBefore: true, undoStopAfter: false });
+    if (rc.entry) await roleInserted(name, rc.keyCol);
     return;
   }
-  const indent = ' '.repeat(pos.character + indentUnit(editor.document));
-  await editor.edit((b) => b.insert(pos, `ansible.builtin.include_role:\n${indent}name: ${name}`));
+  // A new include_role task, with `vars:` for the required variables. Snippet lines are
+  // re-indented to the current line, so columns are relative to its indentation.
+  const unit = ' '.repeat(indentUnit(editor.document));
+  const rel = ' '.repeat(Math.max(0, pos.character - /^\s*/.exec(editor.document.lineAt(pos.line).text)![0].length));
+  const spec = setting('insertRequiredOptions', true) && setting('suggestRoleVariables', true) ? roles.spec(picked.role) : undefined;
+  const required = spec ? Object.values(spec.options).filter((o) => o.required) : [];
+  const s = new vscode.SnippetString(`ansible.builtin.include_role:\n${rel}${unit}name: ${name}`);
+  if (required.length) {
+    s.appendText(`\n${rel}vars:`);
+    for (const o of required) {
+      s.appendText(`\n${rel}${unit}${o.name}: `);
+      if (o.choices?.length) s.appendChoice(o.choices.map(String));
+      else s.appendPlaceholder(o.name);
+    }
+  }
+  s.appendTabstop(0);
+  await editor.insertSnippet(s, pos);
 }
 
 async function pickModule(coll: CollectionInfo): Promise<void> {

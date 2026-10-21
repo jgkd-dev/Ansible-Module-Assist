@@ -2,7 +2,7 @@
   "name": "ansible-module-assist",
   "displayName": "Assistable",
   "description": "Dot-triggered IntelliSense for Ansible playbooks: modules from ansible.builtin and every installed Galaxy collection (pfsensible.core, community.general, ...) with options, choices and docs on hover, plus role names, role files and go-to-definition.",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "publisher": "jgkd",
   "license": "MIT",
   "engines": {
@@ -109,6 +109,11 @@
             "type": "boolean",
             "default": true,
             "markdownDescription": "Suggest role names in `roles:`, `include_role` / `import_role` and `meta/main.yml` dependencies, plus `tasks_from:` files and role keywords."
+          },
+          "assistable.suggestRoleVariables": {
+            "type": "boolean",
+            "default": true,
+            "markdownDescription": "Suggest a role's variables under its `vars:` (in a `roles:` entry, or next to `include_role` / `import_role`), from `meta/argument_specs.yml`. Roles without argument specs fall back to the keys in `defaults/main.yml`, except ones starting with `_`."
           },
           "assistable.includeDeprecated": {
             "type": "boolean",

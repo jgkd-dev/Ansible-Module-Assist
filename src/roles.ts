@@ -22,9 +22,17 @@ export interface RoleInfo {
 export interface RoleDetails {
   description?: string;
   author?: string;
-  /** Options of the `main` entry point in meta/argument_specs.yml. */
-  options: Record<string, OptionDoc>;
   dependencies: string[];
+}
+
+/** Variables a role accepts at one entry point. */
+export interface RoleSpec {
+  entryPoint: string;
+  shortDescription?: string;
+  description: string;
+  options: Record<string, OptionDoc>;
+  /** `argument_specs`: declared by the role. `defaults`: guessed from defaults/main.yml, all optional. */
+  source: 'argument_specs' | 'defaults';
 }
 
 export interface RoleIndexOptions {
@@ -52,6 +60,7 @@ export class RoleIndex {
   /** Roles in a playbook-adjacent `roles/` folder, cached per folder. */
   private readonly dirCache = new Map<string, RoleInfo[]>();
   private readonly detailsCache = new Map<string, RoleDetails>();
+  private readonly specCache = new Map<string, RoleSpec | undefined>();
   roots: string[] = [];
 
   constructor(private readonly opts: RoleIndexOptions) {}
@@ -61,6 +70,7 @@ export class RoleIndex {
     this.collectionRoles.clear();
     this.dirCache.clear();
     this.detailsCache.clear();
+    this.specCache.clear();
     this.roots = this.candidateRoots();
     for (const root of this.roots) {
       for (const role of this.scanDir(root, 'path')) if (!this.byName.has(role.name)) this.byName.set(role.name, role);
@@ -152,26 +162,64 @@ export class RoleIndex {
     return this.entryFile(role, 'tasks', 'main') ?? this.entryFile(role, 'meta', 'main') ?? role.root;
   }
 
-  /** meta/main.yml and meta/argument_specs.yml, read on demand and cached. */
+  /** Description, author and dependencies from meta/, read on demand and cached. Variables come from `spec()`. */
   details(role: RoleInfo): RoleDetails {
     let d = this.detailsCache.get(role.root);
     if (d) return d;
     const meta = readYaml(path.join(role.root, 'meta', 'main')) ?? {};
-    const specs = readYaml(path.join(role.root, 'meta', 'argument_specs'))?.argument_specs ?? meta.argument_specs;
-    const main = specs?.main ?? {};
+    const main = readArgumentSpecs(role.root, meta)?.main ?? {};
     const info = meta.galaxy_info ?? {};
     // `ansible-galaxy role init` leaves this placeholder; many roles never replace it.
     const description = main.short_description ?? (info.description === 'your role description' ? undefined : info.description);
     d = {
       description: description ? cleanMarkup(String(description)) : undefined,
       author: info.author ? String(info.author) : undefined,
-      options: normaliseOptions(main.options),
       dependencies: (Array.isArray(meta.dependencies) ? meta.dependencies : [])
         .map((x: any) => (typeof x === 'string' ? x : (x?.role ?? x?.name)))
         .filter((x: unknown): x is string => typeof x === 'string'),
     };
     this.detailsCache.set(role.root, d);
     return d;
+  }
+
+  /**
+   * The variables a role takes at an entry point (`main`, or a `tasks_from`
+   * file), from meta/argument_specs.yml. Roles without a spec for it fall back
+   * to the keys in defaults/main.yml, minus `_private` ones, all optional.
+   */
+  spec(role: RoleInfo, entryPoint = 'main'): RoleSpec | undefined {
+    const cacheKey = `${role.root}\0${entryPoint}`;
+    if (this.specCache.has(cacheKey)) return this.specCache.get(cacheKey);
+    const meta = readYaml(path.join(role.root, 'meta', 'main')) ?? {};
+    const entry = readArgumentSpecs(role.root, meta)?.[entryPoint];
+    let spec: RoleSpec | undefined;
+    if (entry && typeof entry === 'object') {
+      spec = {
+        entryPoint,
+        shortDescription: entry.short_description ? cleanMarkup(String(entry.short_description)) : undefined,
+        description: [entry.description].flat().filter(Boolean).map((x) => cleanMarkup(String(x))).join('\n\n'),
+        options: normaliseOptions(entry.options),
+        source: 'argument_specs',
+      };
+    } else {
+      const defaults = readDefaults(role.root);
+      const options: Record<string, OptionDoc> = {};
+      for (const [name, value] of Object.entries(defaults)) {
+        if (name.startsWith('_')) continue;
+        options[name] = {
+          name,
+          description: '',
+          type: inferType(value),
+          required: false,
+          // Templated defaults (`{{ other_var }}`) aren't a useful value to suggest.
+          default: typeof value === 'string' && value.includes('{{') ? undefined : value,
+          aliases: [],
+        };
+      }
+      spec = Object.keys(options).length ? { entryPoint, description: '', options, source: 'defaults' } : undefined;
+    }
+    this.specCache.set(cacheKey, spec);
+    return spec;
   }
 
   private candidateRoots(): string[] {
@@ -235,10 +283,44 @@ export class RoleIndex {
   }
 }
 
+/** `argument_specs:` from meta/argument_specs.yml, or from meta/main.yml (also allowed). */
+function readArgumentSpecs(root: string, meta: any): Record<string, any> | undefined {
+  const specs = readYaml(path.join(root, 'meta', 'argument_specs'))?.argument_specs ?? meta?.argument_specs;
+  return specs && typeof specs === 'object' ? specs : undefined;
+}
+
+/** defaults/main.yml, or every file in a defaults/main/ folder merged in name order (as Ansible does). */
+function readDefaults(root: string): Record<string, unknown> {
+  const base = path.join(root, 'defaults', 'main');
+  const asMap = (y: any) => (y && typeof y === 'object' && !Array.isArray(y) ? y : {});
+  if (!isDir(base)) return asMap(readYaml(base));
+  const out: Record<string, unknown> = {};
+  for (const f of safeReaddir(base).sort()) {
+    const ext = path.extname(f);
+    if (YAML_EXT.includes(ext)) Object.assign(out, asMap(readYaml(path.join(base, f.slice(0, -ext.length)))));
+  }
+  return out;
+}
+
+function inferType(v: unknown): string | undefined {
+  if (typeof v === 'boolean') return 'bool';
+  if (typeof v === 'number') return Number.isInteger(v) ? 'int' : 'float';
+  if (typeof v === 'string') return 'str';
+  if (Array.isArray(v)) return 'list';
+  if (v && typeof v === 'object') return 'dict';
+  return undefined;
+}
+
+/** Ansible's own tags: `!unsafe` keeps the string as is, `!vault` is encrypted (no usable value). */
+const ANSIBLE_TAGS = [
+  { tag: '!unsafe', resolve: (str: string) => str },
+  { tag: '!vault', resolve: () => null },
+];
+
 function readYaml(base: string): any {
   for (const ext of YAML_EXT) {
     try {
-      return parseYaml(fs.readFileSync(base + ext, 'utf8'), { strict: false, uniqueKeys: false });
+      return parseYaml(fs.readFileSync(base + ext, 'utf8'), { strict: false, uniqueKeys: false, customTags: ANSIBLE_TAGS, logLevel: 'error' });
     } catch {
       /* missing or unparseable: try the next extension */
     }

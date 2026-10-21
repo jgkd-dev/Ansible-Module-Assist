@@ -11,3 +11,10 @@ argument_specs:
         options:
           cert:
             type: path
+  install:
+    short_description: Installs packages only
+    options:
+      install_method:
+        type: str
+        required: true
+        choices: [package, source]

@@ -49,17 +49,24 @@ You need Ansible installed where VS Code runs (see [Where modules come from](#wh
     - |                        # → web, db, geerlingguy.docker, acme. …
     - role: acme.infra.|       # → collection roles, drilled down by `.`
       tags: [base]             # role keywords: tags, when, become, vars …
+      vars:
+        |                      # → the role's variables, required first
   tasks:
     - ansible.builtin.include_role:
         name: web              # role names here too
         tasks_from: |          # → main, install, sub/tls (files in roles/web/tasks/)
+      vars:
+        install_method: |      # → package, source (from the `install` entry point)
 ```
 
 - **Role names** in a play's `roles:`, in `include_role` / `import_role` `name:` and in `dependencies:` in `meta/main.yml`. Picking one in a `roles:` list inserts `role: <name>` so you can add keywords after it.
 - **Collection roles** by FQCN, drilled down with `.` like modules.
 - **Role files** for `tasks_from:`, `vars_from:`, `defaults_from:` and `handlers_from:`.
 - **Role keywords** inside a `roles:` entry (`vars`, `tags`, `when`, `become`, `delegate_to` …).
-- **Hover** on a role shows its description, its required and optional variables (from `meta/argument_specs.yml`), its dependencies, and where it came from.
+- **Role variables** under the `vars:` of a `roles:` entry, or the task-level `vars:` next to `include_role` / `import_role`, work like module options: required ones first, variables you've already set hidden, choice and boolean values, inline ghost-text hints and hover docs. They come from the role's `meta/argument_specs.yml`, using the entry point that `tasks_from:` names (or `main`).
+- **Roles without argument specs** fall back to the keys in `defaults/main.yml` (or `defaults/main/*.yml`). These are all optional, keys starting with `_` are hidden, and they're marked "from defaults/main.yml" because some may be internal.
+- **Required variables inserted for you**: picking a role in a `roles:` list, or with **Insert role…**, adds `vars:` with the variables its argument specs require, as tab stops.
+- **Hover** on a role shows its description, its required and optional variables, its dependencies, and where it came from.
 - **Go to Definition** (`F12`) on a role opens its `tasks/main.yml`. On a `tasks_from:` value it opens that file.
 
 Roles are found in the same order Ansible uses. The first match wins.
@@ -108,11 +115,12 @@ The **Assistable** output channel lists every collection and role found and wher
 | `assistable.collectionsPaths` | `[]` | Extra collection folders to scan |
 | `assistable.rolesPaths` | `[]` | Extra role folders to scan |
 | `assistable.useAnsibleDoc` | `true` | Fall back to `ansible-doc` |
-| `assistable.insertRequiredOptions` | `true` | Insert required options when a module is picked |
+| `assistable.insertRequiredOptions` | `true` | Insert required options (or role variables) when a module or role is picked |
 | `assistable.inlineSuggestions` | `true` | Grey ghost-text parameter suggestions |
 | `assistable.suggestShortNames` | `true` | `copy` → `ansible.builtin.copy` |
 | `assistable.suggestTaskKeywords` | `true` | Suggest `when`, `register`, … |
 | `assistable.suggestRoles` | `true` | Suggest role names, role files and role keywords |
+| `assistable.suggestRoleVariables` | `true` | Suggest a role's variables under its `vars:` |
 | `assistable.includeDeprecated` | `false` | Include `_deprecated` modules |
 | `assistable.activation` | `auto` | `auto`: YAML that looks like Ansible; `always`: all YAML |
 
@@ -126,7 +134,11 @@ Settings moved from `ansibleModules.*` to `assistable.*` in 0.4.0, with the same
 
 ## Roadmap
 
-- **Role variables**: suggest a role's variables under `vars:`, from `meta/argument_specs.yml` (or `defaults/main.yml`), with required ones inserted and inline hints, as for module options. See the [roles plan](https://github.com/jgkd-dev/Ansible-Module-Assist/blob/main/docs/roles-plan.md).
+- **Role diagnostics**: warn about unknown roles, missing required role variables, and variables a role's argument specs don't declare.
+- **Variables in templates**: `{{ var }}` completion inside a role's own tasks, from its defaults and vars.
+- **`requirements.yml`**: flag roles and collections that are listed there but not installed.
+
+See the [roles plan](https://github.com/jgkd-dev/Ansible-Module-Assist/blob/main/docs/roles-plan.md) for details.
 
 Ideas and bug reports are welcome on [GitHub Issues](https://github.com/jgkd-dev/Ansible-Module-Assist/issues).
 

@@ -12,7 +12,11 @@ export interface Ghost {
   text: string;
 }
 
-export type DocLookup = (moduleKey: string) => Promise<ModuleDoc | undefined>;
+/**
+ * Docs for the block opened by `key` on line `keyLine`: a module's options, or
+ * for `vars:` the variables of the role it's passed to.
+ */
+export type DocLookup = (key: string, keyLine?: number) => Promise<ModuleDoc | undefined>;
 
 export async function planGhost(
   lines: string[],
@@ -27,9 +31,9 @@ export async function planGhost(
 
   // A) End of a module line: `pfsensible.core.pfsense_rule:|` → "\n  name: "
   const li = analyseLine(lineText);
-  if (li.key && li.opensBlock && /:\s*$/.test(prefix) && isTaskModuleKey(lines, lineNo, li)) {
+  if (li.key && li.opensBlock && /:\s*$/.test(prefix) && (li.key === 'vars' || isTaskModuleKey(lines, lineNo, li))) {
     if (hasChildren(lines, lineNo, li.keyCol)) return undefined;
-    const d = await lookup(li.key);
+    const d = await lookup(li.key, lineNo);
     const first = d && missingRequired(d, new Set())[0];
     if (!first) return undefined;
     const indent = ' '.repeat(li.keyCol + indentUnit);
@@ -41,7 +45,7 @@ export async function planGhost(
   if (val) {
     const enc = findEnclosing(lines, lineNo, val.keyCol, val.dashCol);
     if (!enc.mapParentKey) return undefined;
-    const d = await lookup(enc.mapParentKey);
+    const d = await lookup(enc.mapParentKey, enc.mapParentLine);
     const opt = d && findOption(d, val.key);
     if (!opt) return undefined;
     const candidates = valueCandidates(opt);
@@ -58,7 +62,7 @@ export async function planGhost(
   if (tok.start === 0 && tok.token === '') return undefined;
   const enc = findEnclosing(lines, lineNo, tok.start);
   if (!enc.mapParentKey) return undefined;
-  const d = await lookup(enc.mapParentKey);
+  const d = await lookup(enc.mapParentKey, enc.mapParentLine);
   if (!d) return undefined;
   const present = siblingKeys(lines, lineNo, tok.start);
   const missing = Object.values(d.options).filter((o) => !present.has(o.name) && !o.aliases.some((a) => present.has(a)));
