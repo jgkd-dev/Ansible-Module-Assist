@@ -1,8 +1,8 @@
 {
   "name": "ansible-module-assist",
-  "displayName": "Ansible Module Assist",
-  "description": "Dot-triggered IntelliSense for Ansible playbooks: ansible.builtin, ansible.posix and every installed Galaxy collection (pfsensible.core, community.general, ...), with module options, choices and docs on hover.",
-  "version": "0.3.2",
+  "displayName": "Assistable",
+  "description": "Dot-triggered IntelliSense for Ansible playbooks: modules from ansible.builtin and every installed Galaxy collection (pfsensible.core, community.general, ...) with options, choices and docs on hover, plus role names, role files and go-to-definition.",
+  "version": "0.4.0",
   "publisher": "jgkd",
   "license": "MIT",
   "engines": {
@@ -19,7 +19,8 @@
     "galaxy",
     "collections",
     "intellisense",
-    "yaml"
+    "yaml",
+    "roles"
   ],
   "main": "./dist/extension.js",
   "activationEvents": [
@@ -29,89 +30,171 @@
   "contributes": {
     "commands": [
       {
-        "command": "ansibleModules.refresh",
-        "title": "Re-scan installed collections",
-        "category": "Ansible Modules"
+        "command": "assistable.refresh",
+        "title": "Re-scan installed collections and roles",
+        "category": "Assistable"
       },
       {
-        "command": "ansibleModules.showCollections",
+        "command": "assistable.showCollections",
         "title": "Show installed collections",
-        "category": "Ansible Modules"
+        "category": "Assistable"
       },
       {
-        "command": "ansibleModules.insertModule",
+        "command": "assistable.insertModule",
         "title": "Insert module…",
-        "category": "Ansible Modules"
+        "category": "Assistable"
+      },
+      {
+        "command": "assistable.showRoles",
+        "title": "Show roles",
+        "category": "Assistable"
+      },
+      {
+        "command": "assistable.insertRole",
+        "title": "Insert role…",
+        "category": "Assistable"
       }
     ],
-    "configuration": {
-      "title": "Ansible Module Assist",
-      "properties": {
-        "ansibleModules.ansibleBinPath": {
-          "type": "string",
-          "default": "",
-          "markdownDescription": "Folder containing `ansible`, `ansible-galaxy` and `ansible-doc` (e.g. a virtualenv `bin` folder). Leave empty to use PATH, `~/.local/bin` and `.venv/bin` in the workspace."
-        },
-        "ansibleModules.collectionsPaths": {
-          "type": "array",
-          "items": {
-            "type": "string"
+    "configuration": [
+      {
+        "title": "Assistable",
+        "properties": {
+          "assistable.ansibleBinPath": {
+            "type": "string",
+            "default": "",
+            "markdownDescription": "Folder containing `ansible`, `ansible-galaxy` and `ansible-doc` (e.g. a virtualenv `bin` folder). Leave empty to use PATH, `~/.local/bin` and `.venv/bin` in the workspace."
           },
-          "default": [],
-          "markdownDescription": "Extra collection paths to scan, in addition to `ansible-galaxy collection list`, `ansible.cfg`, `ANSIBLE_COLLECTIONS_PATH`, `~/.ansible/collections` and `./collections`."
-        },
-        "ansibleModules.useAnsibleDoc": {
-          "type": "boolean",
-          "default": true,
-          "markdownDescription": "Fall back to `ansible-doc` when a module's documentation can't be read from its source file (rare). Docs are read from the module files first because that's instant."
-        },
-        "ansibleModules.insertRequiredOptions": {
-          "type": "boolean",
-          "default": true,
-          "description": "When a module is picked, insert its required options as a snippet."
-        },
-        "ansibleModules.inlineSuggestions": {
-          "type": "boolean",
-          "default": true,
-          "markdownDescription": "Show module parameters as grey inline ghost text (like inline AI suggestions): the next required parameter on a new line, partial parameter names, and default/choice values. Press `Tab` to accept."
-        },
-        "ansibleModules.suggestShortNames": {
-          "type": "boolean",
-          "default": true,
-          "markdownDescription": "Typing a bare module name (e.g. `copy`) offers the full name (`ansible.builtin.copy`)."
-        },
-        "ansibleModules.suggestTaskKeywords": {
-          "type": "boolean",
-          "default": true,
-          "markdownDescription": "Also suggest task keywords such as `name`, `when`, `register`, `loop`, `become`."
-        },
-        "ansibleModules.includeDeprecated": {
-          "type": "boolean",
-          "default": false,
-          "markdownDescription": "Include deprecated modules (files starting with `_`)."
-        },
-        "ansibleModules.activation": {
-          "type": "string",
-          "enum": [
-            "auto",
-            "always"
-          ],
-          "default": "auto",
-          "enumDescriptions": [
-            "Only in YAML files that look like Ansible (tasks/, roles/, playbooks, files with hosts:/tasks:/- name:)",
-            "In every YAML file"
-          ],
-          "description": "Which YAML files get suggestions."
+          "assistable.collectionsPaths": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "default": [],
+            "markdownDescription": "Extra collection paths to scan, in addition to `ansible-galaxy collection list`, `ansible.cfg`, `ANSIBLE_COLLECTIONS_PATH`, `~/.ansible/collections` and `./collections`."
+          },
+          "assistable.rolesPaths": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "default": [],
+            "markdownDescription": "Extra role folders to search, in addition to `roles/` next to the playbook, `roles_path` in `ansible.cfg`, `ANSIBLE_ROLES_PATH`, `~/.ansible/roles`, `/usr/share/ansible/roles`, `/etc/ansible/roles` and roles inside installed collections. Relative paths are resolved from the first workspace folder."
+          },
+          "assistable.useAnsibleDoc": {
+            "type": "boolean",
+            "default": true,
+            "markdownDescription": "Fall back to `ansible-doc` when a module's documentation can't be read from its source file (rare). Docs are read from the module files first because that's instant."
+          },
+          "assistable.insertRequiredOptions": {
+            "type": "boolean",
+            "default": true,
+            "description": "When a module is picked, insert its required options as a snippet."
+          },
+          "assistable.inlineSuggestions": {
+            "type": "boolean",
+            "default": true,
+            "markdownDescription": "Show module parameters as grey inline ghost text (like inline AI suggestions): the next required parameter on a new line, partial parameter names, and default/choice values. Press `Tab` to accept."
+          },
+          "assistable.suggestShortNames": {
+            "type": "boolean",
+            "default": true,
+            "markdownDescription": "Typing a bare module name (e.g. `copy`) offers the full name (`ansible.builtin.copy`)."
+          },
+          "assistable.suggestTaskKeywords": {
+            "type": "boolean",
+            "default": true,
+            "markdownDescription": "Also suggest task keywords such as `name`, `when`, `register`, `loop`, `become`."
+          },
+          "assistable.suggestRoles": {
+            "type": "boolean",
+            "default": true,
+            "markdownDescription": "Suggest role names in `roles:`, `include_role` / `import_role` and `meta/main.yml` dependencies, plus `tasks_from:` files and role keywords."
+          },
+          "assistable.includeDeprecated": {
+            "type": "boolean",
+            "default": false,
+            "markdownDescription": "Include deprecated modules (files starting with `_`)."
+          },
+          "assistable.activation": {
+            "type": "string",
+            "enum": [
+              "auto",
+              "always"
+            ],
+            "default": "auto",
+            "enumDescriptions": [
+              "Only in YAML files that look like Ansible (tasks/, roles/, playbooks, files with hosts:/tasks:/- name:)",
+              "In every YAML file"
+            ],
+            "description": "Which YAML files get suggestions."
+          }
+        }
+      },
+      {
+        "title": "Assistable (old setting names)",
+        "properties": {
+          "ansibleModules.ansibleBinPath": {
+            "type": "string",
+            "default": "",
+            "markdownDeprecationMessage": "Renamed to `#assistable.ansibleBinPath#`. This name still works until 1.0."
+          },
+          "ansibleModules.collectionsPaths": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "default": [],
+            "markdownDeprecationMessage": "Renamed to `#assistable.collectionsPaths#`. This name still works until 1.0."
+          },
+          "ansibleModules.useAnsibleDoc": {
+            "type": "boolean",
+            "default": true,
+            "markdownDeprecationMessage": "Renamed to `#assistable.useAnsibleDoc#`. This name still works until 1.0."
+          },
+          "ansibleModules.insertRequiredOptions": {
+            "type": "boolean",
+            "default": true,
+            "markdownDeprecationMessage": "Renamed to `#assistable.insertRequiredOptions#`. This name still works until 1.0."
+          },
+          "ansibleModules.inlineSuggestions": {
+            "type": "boolean",
+            "default": true,
+            "markdownDeprecationMessage": "Renamed to `#assistable.inlineSuggestions#`. This name still works until 1.0."
+          },
+          "ansibleModules.suggestShortNames": {
+            "type": "boolean",
+            "default": true,
+            "markdownDeprecationMessage": "Renamed to `#assistable.suggestShortNames#`. This name still works until 1.0."
+          },
+          "ansibleModules.suggestTaskKeywords": {
+            "type": "boolean",
+            "default": true,
+            "markdownDeprecationMessage": "Renamed to `#assistable.suggestTaskKeywords#`. This name still works until 1.0."
+          },
+          "ansibleModules.includeDeprecated": {
+            "type": "boolean",
+            "default": false,
+            "markdownDeprecationMessage": "Renamed to `#assistable.includeDeprecated#`. This name still works until 1.0."
+          },
+          "ansibleModules.activation": {
+            "type": "string",
+            "enum": [
+              "auto",
+              "always"
+            ],
+            "default": "auto",
+            "markdownDeprecationMessage": "Renamed to `#assistable.activation#`. This name still works until 1.0."
+          }
         }
       }
-    }
+    ]
   },
   "scripts": {
     "build": "esbuild src/extension.ts --bundle --outfile=dist/extension.js --external:vscode --format=cjs --platform=node --target=node18 --minify-syntax",
     "watch": "npm run build -- --watch --sourcemap",
     "typecheck": "tsc --noEmit",
     "test": "esbuild test/run.ts --bundle --outfile=out/test.js --platform=node --format=cjs && node out/test.js",
-    "package": "npm run typecheck && npm run build && vsce package --no-dependencies --allow-missing-repository",
+    "package": "npm run typecheck && npm run build && vsce package --no-dependencies --allow-missing-repository --out assistable-$npm_package_version.vsix",
     "vscode:prepublish": "npm run build",
     "bump:patch": "npm version patch --no-git-tag-version",
     "bump:minor": "npm version minor --no-git-tag-version",

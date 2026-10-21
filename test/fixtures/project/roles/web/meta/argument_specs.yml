@@ -1,0 +1,13 @@
+argument_specs:
+  main:
+    short_description: Installs the C(nginx) web server
+    options:
+      web_port:
+        type: int
+        required: true
+        description: Port to listen on
+      web_tls:
+        type: dict
+        options:
+          cert:
+            type: path

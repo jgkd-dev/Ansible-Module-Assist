@@ -5,7 +5,7 @@
 - Every pull request runs **CI** (`test` job): typecheck, tests against a real Ansible install, and a `.vsix` build you can download from the run.
 - `main` is protected: changes go in through a pull request, and the `test` check must pass first.
 - Every merge to `main` runs **Release**. If the version in `package.json` doesn't have a git tag yet, it:
-  1. builds `ansible-module-assist-<version>.vsix`
+  1. builds `assistable-<version>.vsix`
   2. publishes it to the VS Code Marketplace (if set up)
   3. publishes it to Open VSX (if set up)
   4. creates the GitHub Release `v<version>` with the `.vsix` attached and notes generated from the merged PRs

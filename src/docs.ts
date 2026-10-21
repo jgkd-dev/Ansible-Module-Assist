@@ -179,7 +179,7 @@ function normaliseDoc(fqcn: string, doc: any, examples: string | undefined, sour
   };
 }
 
-function normaliseOptions(raw: any): Record<string, OptionDoc> {
+export function normaliseOptions(raw: any): Record<string, OptionDoc> {
   const out: Record<string, OptionDoc> = {};
   if (!raw || typeof raw !== 'object') return out;
   for (const [name, o] of Object.entries<any>(raw)) {
@@ -193,7 +193,8 @@ function normaliseOptions(raw: any): Record<string, OptionDoc> {
       default: o.default,
       choices: Array.isArray(o.choices) ? o.choices : o.choices && typeof o.choices === 'object' ? Object.keys(o.choices) : undefined,
       aliases: Array.isArray(o.aliases) ? o.aliases.map(String) : [],
-      suboptions: o.suboptions ? normaliseOptions(o.suboptions) : undefined,
+      // Role argument specs nest under `options:`, module docs under `suboptions:`.
+      suboptions: o.suboptions || o.options ? normaliseOptions(o.suboptions ?? o.options) : undefined,
     };
   }
   return out;

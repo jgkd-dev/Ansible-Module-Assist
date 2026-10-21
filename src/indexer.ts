@@ -273,9 +273,14 @@ function readCollectionVersion(root: string): string | undefined {
 }
 
 function readAnsibleCfgCollectionPaths(ws: string): string[] {
+  return readAnsibleCfgPaths(ws, 'collections_paths?');
+}
+
+/** A `:`-separated path list from the workspace `ansible.cfg`, e.g. `roles_path`. `key` is a regex source. */
+export function readAnsibleCfgPaths(ws: string, key: string): string[] {
   try {
     const cfg = fs.readFileSync(path.join(ws, 'ansible.cfg'), 'utf8');
-    const m = /^\s*collections_paths?\s*=\s*(.+)$/m.exec(cfg);
+    const m = new RegExp(`^\\s*${key}\\s*=\\s*(.+)$`, 'm').exec(cfg);
     return m ? m[1].split(':').map((s) => s.trim()).filter(Boolean) : [];
   } catch {
     return [];
@@ -292,7 +297,7 @@ function parseJsonLoose(text: string): any {
   }
 }
 
-function safeReaddir(dir: string): string[] {
+export function safeReaddir(dir: string): string[] {
   try {
     return fs.readdirSync(dir);
   } catch {
@@ -300,7 +305,7 @@ function safeReaddir(dir: string): string[] {
   }
 }
 
-function isDir(p: string): boolean {
+export function isDir(p: string): boolean {
   try {
     return fs.statSync(p).isDirectory();
   } catch {
