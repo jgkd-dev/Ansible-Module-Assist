@@ -1,6 +1,19 @@
 import assert from 'node:assert/strict';
-import { analyseLine, findEnclosing, keyTokenBeforeCursor, siblingKeys, valueTokenBeforeCursor, looksLikeAnsible } from '../src/context';
+import * as path from 'node:path';
+import {
+  analyseLine,
+  findEnclosing,
+  keyTokenBeforeCursor,
+  siblingKeys,
+  siblingValue,
+  valueTokenBeforeCursor,
+  looksLikeAnsible,
+  roleContext,
+  roleReferenceAt,
+} from '../src/context';
 import { ModuleIndex } from '../src/indexer';
+import { RoleIndex } from '../src/roles';
+import { pickSetting } from '../src/settings';
 import { DocProvider, cleanMarkup } from '../src/docs';
 import { planGhost } from '../src/ghost';
 
@@ -96,6 +109,129 @@ const playbook = `- hosts: firewall
     assert.ok(looksLikeAnsible('/x/site.yml', playbook.join('\n')));
     assert.ok(looksLikeAnsible('/x/roles/web/tasks/main.yml', ''));
     assert.ok(!looksLikeAnsible('/x/k8s/deploy.yaml', 'apiVersion: v1\nkind: Pod\nmetadata:\n  name: x\n'));
+    assert.ok(looksLikeAnsible('/x/roles/web/handlers/main.yml', ''));
+    assert.ok(looksLikeAnsible('/x/roles/web/meta/main.yml', ''));
+    // Role folders that never hold tasks, even when the content looks like tasks
+    assert.ok(!looksLikeAnsible('/x/roles/web/files/list.yml', '- name: not a task\n'));
+    assert.ok(!looksLikeAnsible('/x/roles/web/templates/app.yml', '- name: x\n'));
+    assert.ok(!looksLikeAnsible('/x/roles/web/defaults/main.yml', 'web_port: 80\n'));
+  });
+  await test('siblingValue', () => {
+    const lines = ['- include_role:', '    name: "web"  # comment', '    tasks_from: '];
+    assert.equal(siblingValue(lines, 2, 4, 'name'), 'web');
+    assert.equal(siblingValue(lines, 2, 4, 'missing'), undefined);
+  });
+
+  console.log('role context');
+  const rcAt = (text: string) => {
+    const lines = text.split('\n');
+    const lineNo = lines.findIndex((l) => l.includes('|'));
+    const col = lines[lineNo].indexOf('|');
+    lines[lineNo] = lines[lineNo].replace('|', '');
+    return { rc: roleContext(lines, lineNo, lines[lineNo].slice(0, col)), lines, lineNo, col };
+  };
+  const play = '- hosts: all\n  roles:\n';
+  await test('new entry in roles: is a role name inserted as `role:`', () => {
+    const { rc } = rcAt(play + '    - we|');
+    assert.deepEqual(rc, { kind: 'roleName', start: 6, token: 'we', value: false, asKey: true });
+  });
+  await test('role: / name: values in roles: and dependencies:', () => {
+    assert.equal(rcAt(play + '    - role: acme.|').rc?.kind, 'roleName');
+    assert.equal(rcAt(play + '    - role: acme.|').rc?.token, 'acme.');
+    assert.equal(rcAt(play + '    - name: w|').rc?.kind, 'roleName');
+    assert.equal(rcAt('dependencies:\n  - role: |').rc?.kind, 'roleName');
+    assert.equal(rcAt("dependencies:\n  - role: 'co|").rc?.token, 'co');
+  });
+  await test('keywords inside a roles: entry', () => {
+    const { rc } = rcAt(play + '    - role: web\n      ta|');
+    assert.equal(rc?.kind, 'roleKeyword');
+    assert.ok(rc?.kind === 'roleKeyword' && rc.siblings.has('role'));
+  });
+  await test('include_role / import_role name and tasks_from', () => {
+    const t = '- hosts: all\n  tasks:\n    - ansible.builtin.include_role:\n        name: web\n';
+    assert.deepEqual(rcAt('- hosts: all\n  tasks:\n    - import_role:\n        name: |').rc, { kind: 'roleName', start: 14, token: '', value: true, asKey: false });
+    const f = rcAt(t + '        tasks_from: ins|').rc;
+    assert.deepEqual(f, { kind: 'roleFile', start: 20, token: 'ins', value: true, folder: 'tasks', role: 'web' });
+    assert.equal(rcAt(t + '        vars_from: |').rc?.kind, 'roleFile');
+  });
+  await test('not role positions', () => {
+    assert.equal(rcAt('- hosts: all\n  tasks:\n    - name: x|').rc, undefined);
+    assert.equal(rcAt('- hosts: all\n  tasks:\n    - ansible.b|').rc, undefined);
+    assert.equal(rcAt(play + '    - role: web\n      vars:\n        x|').rc, undefined, 'role vars are phase 2');
+    assert.equal(rcAt('- ansible.builtin.copy:\n    name: |').rc, undefined);
+  });
+  await test('roleReferenceAt finds role names and files under the cursor', () => {
+    const lines = ['- hosts: all', '  roles:', '    - web', "    - role: 'acme.infra.base'", '  tasks:', '    - include_role:', '        name: db', '        tasks_from: install'];
+    assert.deepEqual(roleReferenceAt(lines, 2, 7), { kind: 'role', name: 'web', start: 6, end: 9 });
+    assert.equal((roleReferenceAt(lines, 3, 20) as any)?.name, 'acme.infra.base');
+    assert.equal(roleReferenceAt(lines, 3, 7), undefined, 'the `role` key itself');
+    assert.equal((roleReferenceAt(lines, 6, 15) as any)?.name, 'db');
+    assert.deepEqual(roleReferenceAt(lines, 7, 22), { kind: 'file', role: 'db', folder: 'tasks', file: 'install', start: 20, end: 27 });
+    assert.equal(roleReferenceAt(lines, 0, 4), undefined);
+  });
+
+  console.log('role index (fixtures)');
+  const fx = path.resolve(__dirname, '../test/fixtures/project');
+  const roleIndex = new RoleIndex({ rolesPaths: [], workspaceFolders: [fx] });
+  const acmeRoot = path.join(fx, 'collections/ansible_collections/acme/infra');
+  roleIndex.build([{ namespace: 'acme', name: 'infra', fqcn: 'acme.infra', version: '1.2.0', root: acmeRoot, source: 'scan' }]);
+  await test('roles_path from ansible.cfg comes before ./roles', () => {
+    assert.deepEqual(roleIndex.roots.filter((r) => r.startsWith(fx)), [path.join(fx, 'extra_roles'), path.join(fx, 'roles')]);
+    assert.equal(roleIndex.resolve('web')?.root, path.join(fx, 'extra_roles/web'));
+    assert.ok(roleIndex.resolve('common'));
+    assert.equal(roleIndex.resolve('not_a_role'), undefined, 'folders without tasks/meta/... are skipped');
+  });
+  await test("roles/ next to the playbook wins over roles_path", () => {
+    const site = path.join(fx, 'site.yml');
+    assert.equal(roleIndex.resolve('web', site)?.root, path.join(fx, 'roles/web'));
+    assert.equal(roleIndex.resolve('web', site)?.source, 'playbook');
+    // A playbook in a subfolder still finds the project's roles/
+    assert.equal(roleIndex.resolve('db', path.join(fx, 'playbooks/deploy.yml'))?.source, 'playbook');
+    // And a role's own task file finds its sibling roles
+    assert.ok(roleIndex.resolve('db', path.join(fx, 'roles/web/tasks/main.yml')));
+  });
+  await test('Galaxy role names with a dot, and installed version', () => {
+    const r = roleIndex.resolve('geerlingguy.docker')!;
+    assert.equal(r.version, '7.4.1');
+  });
+  await test('collection roles by FQCN', () => {
+    const r = roleIndex.resolve('acme.infra.base')!;
+    assert.equal(r.source, 'collection');
+    assert.equal(r.version, '1.2.0');
+    assert.deepEqual(roleIndex.collectionRolesIn('acme.infra').map((x) => x.name), ['acme.infra.base']);
+    assert.deepEqual([...roleIndex.roleCollections().get('acme')!], ['infra']);
+  });
+  await test('roles by path', () => {
+    assert.equal(roleIndex.resolve('./roles/db', path.join(fx, 'site.yml'))?.root, path.join(fx, 'roles/db'));
+  });
+  await test('entry files for tasks_from', () => {
+    const web = roleIndex.resolve('web', path.join(fx, 'site.yml'))!;
+    assert.deepEqual(roleIndex.entryFiles(web, 'tasks'), ['main', 'install', 'sub/tls']);
+    assert.equal(roleIndex.entryFile(web, 'tasks', 'install'), path.join(web.root, 'tasks/install.yml'));
+    assert.equal(roleIndex.entryFile(web, 'tasks', 'sub/tls'), path.join(web.root, 'tasks/sub/tls.yaml'));
+    assert.equal(roleIndex.entryFile(web, 'tasks', 'nope'), undefined);
+    assert.equal(roleIndex.mainFile(web), path.join(web.root, 'tasks/main.yml'));
+  });
+  await test('details: argument_specs, meta and dependencies', () => {
+    const d = roleIndex.details(roleIndex.resolve('web', path.join(fx, 'site.yml'))!);
+    assert.equal(d.description, 'Installs the `nginx` web server', 'argument_specs short_description wins over galaxy_info');
+    assert.equal(d.author, 'ops');
+    assert.equal(d.options.web_port.required, true);
+    assert.equal(d.options.web_port.type, 'int');
+    assert.deepEqual(Object.keys(d.options.web_tls.suboptions!), ['cert'], 'nested `options:` become suboptions');
+    assert.deepEqual(d.dependencies, ['common', 'acme.infra.base']);
+    assert.equal(roleIndex.details(roleIndex.resolve('acme.infra.base')!).description, 'Base hardening');
+    assert.deepEqual(roleIndex.details(roleIndex.resolve('db', path.join(fx, 'site.yml'))!).options, {});
+  });
+
+  console.log('settings');
+  await test('new key wins within a scope, more specific scope wins overall', () => {
+    assert.equal(pickSetting({ defaultValue: 'auto' }, undefined, 'x'), 'auto');
+    assert.equal(pickSetting({ defaultValue: 'auto' }, { globalValue: 'always' }, 'x'), 'always', 'old key still read');
+    assert.equal(pickSetting({ globalValue: 'auto' }, { globalValue: 'always' }, 'x'), 'auto', 'new beats old');
+    assert.equal(pickSetting({ globalValue: 'auto' }, { workspaceValue: 'always' }, 'x'), 'always', 'old workspace beats new user');
+    assert.equal(pickSetting<boolean>(undefined, undefined, true), true);
+    assert.equal(pickSetting<boolean>({ globalValue: false }, undefined, true), false, 'false is a value');
   });
   await test('cleanMarkup', () => {
     assert.equal(cleanMarkup('Use C(state=present) and I(path) see RV(changed)'), 'Use `state=present` and *path* see `changed`');

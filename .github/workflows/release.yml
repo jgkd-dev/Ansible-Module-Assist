@@ -51,7 +51,7 @@ jobs:
         run: |
           npm ci
           node scripts/set-repository.mjs
-          npx vsce package --no-dependencies --out "ansible-module-assist-${{ steps.version.outputs.version }}.vsix"
+          npx vsce package --no-dependencies --out "assistable-${{ steps.version.outputs.version }}.vsix"
 
       # --- VS Code Marketplace -------------------------------------------------
       # Option A (recommended, required after 1 Dec 2026): Microsoft Entra
@@ -71,7 +71,7 @@ jobs:
         env:
           USE_AZURE: ${{ vars.AZURE_CLIENT_ID != '' }}
         run: |
-          VSIX="ansible-module-assist-${{ steps.version.outputs.version }}.vsix"
+          VSIX="assistable-${{ steps.version.outputs.version }}.vsix"
           if [ "$USE_AZURE" = "true" ]; then
             npx vsce publish --packagePath "$VSIX" --azure-credential --skip-duplicate
           else
@@ -81,7 +81,7 @@ jobs:
       # --- Open VSX (VSCodium, Cursor, Windsurf, Gitpod) — optional --------------
       - name: Publish to Open VSX
         if: steps.version.outputs.release == 'true' && env.OVSX_PAT != ''
-        run: npx ovsx publish "ansible-module-assist-${{ steps.version.outputs.version }}.vsix" --pat "$OVSX_PAT" --skip-duplicate
+        run: npx ovsx publish "assistable-${{ steps.version.outputs.version }}.vsix" --pat "$OVSX_PAT" --skip-duplicate
 
       # --- GitHub Release (last, so a failed publish can simply be re-run) ------
       - name: Create GitHub Release
@@ -90,7 +90,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release create "${{ steps.version.outputs.tag }}" \
-            "ansible-module-assist-${{ steps.version.outputs.version }}.vsix" \
+            "assistable-${{ steps.version.outputs.version }}.vsix" \
             --title "${{ steps.version.outputs.tag }}" \
             --target "${{ github.sha }}" \
             --generate-notes

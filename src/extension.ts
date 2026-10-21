@@ -2,13 +2,19 @@ import * as vscode from 'vscode';
 import { ModuleIndex, ModuleInfo, CollectionInfo } from './indexer';
 import { planGhost } from './ghost';
 import { DocProvider, ModuleDoc, OptionDoc, docsUrl, galaxyUrl } from './docs';
+import { RoleIndex, RoleInfo } from './roles';
+import { LEGACY_KEYS, LEGACY_SECTION, SCOPES, SECTION, pickSetting } from './settings';
 import {
+  ROLE_KEYWORDS,
+  RoleContext,
   TASK_KEYWORDS,
   TASK_LIST_KEYS,
   analyseLine,
   findEnclosing,
   keyTokenBeforeCursor,
   looksLikeAnsible,
+  roleContext,
+  roleReferenceAt,
   siblingKeys,
   valueTokenBeforeCursor,
 } from './context';
@@ -22,17 +28,21 @@ const SELECTOR: vscode.DocumentSelector = [
   { language: 'ansible', scheme: 'vscode-remote' },
 ];
 
-const CMD_RETRIGGER = 'ansibleModules.retrigger';
-const CMD_MODULE_INSERTED = 'ansibleModules.moduleInserted';
+const CMD_RETRIGGER = 'assistable.retrigger';
+const CMD_MODULE_INSERTED = 'assistable.moduleInserted';
 
 let index: ModuleIndex;
+let roles: RoleIndex;
 let docs: DocProvider;
 let ready: Promise<void>;
 let status: vscode.StatusBarItem;
 let output: vscode.OutputChannel;
 
-function cfg() {
-  return vscode.workspace.getConfiguration('ansibleModules');
+/** Reads `assistable.<key>`, falling back to the pre-0.4 `ansibleModules.<key>`. */
+function setting<T>(key: string, fallback: T): T {
+  const now = vscode.workspace.getConfiguration(SECTION).inspect<T>(key);
+  const old = (LEGACY_KEYS as readonly string[]).includes(key) ? vscode.workspace.getConfiguration(LEGACY_SECTION).inspect<T>(key) : undefined;
+  return pickSetting(now, old, fallback);
 }
 
 function indentUnit(doc: vscode.TextDocument): number {
@@ -44,26 +54,47 @@ function indentUnit(doc: vscode.TextDocument): number {
 async function rebuild(): Promise<void> {
   status.text = '$(sync~spin) Ansible modules';
   index = new ModuleIndex({
-    ansibleBinPath: cfg().get<string>('ansibleBinPath'),
-    collectionsPaths: cfg().get<string[]>('collectionsPaths') ?? [],
+    ansibleBinPath: setting<string>('ansibleBinPath', ''),
+    collectionsPaths: setting<string[]>('collectionsPaths', []),
     workspaceFolders: (vscode.workspace.workspaceFolders ?? []).map((f) => f.uri.fsPath),
-    includeDeprecated: cfg().get<boolean>('includeDeprecated') ?? false,
+    includeDeprecated: setting('includeDeprecated', false),
   });
-  docs = new DocProvider(index, () => cfg().get<boolean>('useAnsibleDoc') ?? true);
+  docs = new DocProvider(index, () => setting('useAnsibleDoc', true));
   ready = index.build().catch((e) => {
     index.log.push(`index failed: ${e}`);
   });
   await ready;
   for (const l of index.log) output.appendLine(l);
   for (const c of index.allCollections()) output.appendLine(`  ${c.fqcn} ${c.version ?? ''} [${c.source}] ${c.root ?? ''}`);
-  status.text = `$(symbol-module) Ansible: ${index.collectionCount} collections`;
-  status.tooltip = `${index.cliAvailable ? `ansible-core ${index.ansibleVersion ?? ''}` : 'ansible CLI not found (using bundled ansible.builtin list)'}\nClick to re-scan installed collections`;
+  rebuildRoles();
+}
+
+/** Roles are cheap to find (no CLI), so they're re-scanned on their own when files change. */
+function rebuildRoles(): void {
+  roles = new RoleIndex({
+    rolesPaths: setting<string[]>('rolesPaths', []),
+    workspaceFolders: (vscode.workspace.workspaceFolders ?? []).map((f) => f.uri.fsPath),
+  });
+  roles.build(index.allCollections());
+  output.appendLine(`indexed ${roles.count} roles from ${roles.roots.length ? roles.roots.join(', ') : 'no roles_path folders'} and collections`);
+  for (const r of roles.all()) output.appendLine(`  ${r.name} ${r.version ?? ''} [${r.source}] ${r.root}`);
+  const n = (x: number, word: string) => `${x} ${word}${x === 1 ? '' : 's'}`;
+  status.text = `$(symbol-module) Ansible: ${n(index.collectionCount, 'collection')} · ${n(roles.count, 'role')}`;
+  status.tooltip = `${index.cliAvailable ? `ansible-core ${index.ansibleVersion ?? ''}` : 'ansible CLI not found (using bundled ansible.builtin list)'}\nClick to re-scan installed collections and roles`;
+}
+
+function debounce(fn: () => void, ms: number): () => void {
+  let t: NodeJS.Timeout | undefined;
+  return () => {
+    clearTimeout(t);
+    t = setTimeout(fn, ms);
+  };
 }
 
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
-  output = vscode.window.createOutputChannel('Ansible Module Assist');
+  output = vscode.window.createOutputChannel('Assistable');
   status = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
-  status.command = 'ansibleModules.refresh';
+  status.command = 'assistable.refresh';
   context.subscriptions.push(output, status);
 
   const updateStatusVisibility = () => {
@@ -74,25 +105,94 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
   ready = rebuild();
 
+  const refresh = async () => {
+    await rebuild();
+    vscode.window.setStatusBarMessage(`Ansible: indexed ${index.collectionCount} collections and ${roles.count} roles`, 4000);
+  };
+  const commands: Record<string, (...args: any[]) => unknown> = {
+    refresh,
+    showCollections,
+    insertModule: insertModuleCommand,
+    showRoles: showRolesCommand,
+    insertRole: insertRoleCommand,
+  };
+  for (const [name, fn] of Object.entries(commands)) {
+    context.subscriptions.push(vscode.commands.registerCommand(`${SECTION}.${name}`, fn));
+  }
+  // Pre-0.4 command IDs, so custom keybindings keep working. Not contributed, so not in the palette.
+  for (const name of ['refresh', 'showCollections', 'insertModule']) {
+    context.subscriptions.push(vscode.commands.registerCommand(`${LEGACY_SECTION}.${name}`, commands[name]));
+  }
+
+  const rescanRoles = debounce(() => void ready.then(rebuildRoles), 500);
+  const rescanAll = debounce(() => void rebuild(), 300);
+  // New or removed roles, and edits to their meta/ (description, argument specs).
+  const roleDirs = vscode.workspace.createFileSystemWatcher('**/roles/{*,*/*}', false, true, false);
+  const roleMeta = vscode.workspace.createFileSystemWatcher('**/roles/*/meta/*.{yml,yaml}');
+  for (const w of [roleDirs, roleMeta]) {
+    w.onDidCreate(rescanRoles);
+    w.onDidDelete(rescanRoles);
+  }
+  roleMeta.onDidChange(rescanRoles);
+
   context.subscriptions.push(
+    roleDirs,
+    roleMeta,
     vscode.languages.registerCompletionItemProvider(SELECTOR, new AnsibleCompletionProvider(), '.', ' '),
     vscode.languages.registerHoverProvider(SELECTOR, new AnsibleHoverProvider()),
+    vscode.languages.registerDefinitionProvider(SELECTOR, new RoleDefinitionProvider()),
     vscode.languages.registerInlineCompletionItemProvider(SELECTOR, new AnsibleInlineProvider()),
-    vscode.commands.registerCommand('ansibleModules.refresh', async () => {
-      await rebuild();
-      vscode.window.setStatusBarMessage(`Ansible: indexed ${index.collectionCount} collections`, 4000);
-    }),
-    vscode.commands.registerCommand('ansibleModules.showCollections', showCollections),
-    vscode.commands.registerCommand('ansibleModules.insertModule', insertModuleCommand),
     vscode.commands.registerCommand(CMD_RETRIGGER, () => vscode.commands.executeCommand('editor.action.triggerSuggest')),
     vscode.commands.registerCommand(CMD_MODULE_INSERTED, moduleInserted),
     vscode.window.onDidChangeActiveTextEditor(updateStatusVisibility),
     vscode.workspace.onDidChangeConfiguration((e) => {
-      if (e.affectsConfiguration('ansibleModules')) void rebuild();
+      if (e.affectsConfiguration(SECTION) || e.affectsConfiguration(LEGACY_SECTION)) rescanAll();
     }),
-    vscode.workspace.onDidChangeWorkspaceFolders(() => void rebuild()),
+    vscode.workspace.onDidChangeWorkspaceFolders(rescanAll),
   );
   updateStatusVisibility();
+  void offerSettingsMove(context);
+}
+
+const MOVE_DISMISSED = 'assistable.settingsMoveDismissed';
+
+/** One-time offer to move `ansibleModules.*` values to `assistable.*`. Writes nothing unless the user agrees. */
+async function offerSettingsMove(context: vscode.ExtensionContext): Promise<void> {
+  if (context.globalState.get<boolean>(MOVE_DISMISSED)) return;
+  type Target = { target: vscode.ConfigurationTarget; uri?: vscode.Uri; scope: (typeof SCOPES)[number] };
+  const targets: Target[] = [
+    { target: vscode.ConfigurationTarget.Global, scope: 'globalValue' },
+    { target: vscode.ConfigurationTarget.Workspace, scope: 'workspaceValue' },
+    ...(vscode.workspace.workspaceFolders ?? []).map((f) => ({ target: vscode.ConfigurationTarget.WorkspaceFolder, uri: f.uri, scope: 'workspaceFolderValue' as const })),
+  ];
+  const moves: { key: string; value: unknown; t: Target }[] = [];
+  for (const t of targets) {
+    const old = vscode.workspace.getConfiguration(LEGACY_SECTION, t.uri);
+    for (const key of LEGACY_KEYS) {
+      const value = old.inspect(key)?.[t.scope];
+      if (value !== undefined) moves.push({ key, value, t });
+    }
+  }
+  if (!moves.length) return;
+  const keys = [...new Set(moves.map((m) => m.key))];
+  const pick = await vscode.window.showInformationMessage(
+    `Assistable settings have moved from ansibleModules.* to assistable.*. You have ${keys.length} old setting${keys.length === 1 ? '' : 's'} (${keys.join(', ')}). They still work, but they'll stop working in 1.0.`,
+    'Move them',
+    'Not now',
+  );
+  if (pick === 'Not now') await context.globalState.update(MOVE_DISMISSED, true);
+  if (pick !== 'Move them') return;
+  try {
+    for (const { key, value, t } of moves) {
+      const now = vscode.workspace.getConfiguration(SECTION, t.uri);
+      // A value already set under the new name wins; just drop the old one.
+      if (now.inspect(key)?.[t.scope] === undefined) await now.update(key, value, t.target);
+      await vscode.workspace.getConfiguration(LEGACY_SECTION, t.uri).update(key, undefined, t.target);
+    }
+    vscode.window.showInformationMessage(`Moved ${moves.length} setting${moves.length === 1 ? '' : 's'} to assistable.*.`);
+  } catch (e) {
+    vscode.window.showWarningMessage(`Couldn't move every setting: ${e}. The old names still work.`);
+  }
 }
 
 export function deactivate(): void {}
@@ -100,7 +200,7 @@ export function deactivate(): void {}
 function isActiveFor(doc: vscode.TextDocument): boolean {
   if (doc.languageId === 'ansible') return true;
   if (doc.languageId !== 'yaml') return false;
-  if (cfg().get<string>('activation') === 'always') return true;
+  if (setting<string>('activation', 'auto') === 'always') return true;
   return looksLikeAnsible(doc.uri.fsPath || doc.uri.path, doc.getText());
 }
 
@@ -124,13 +224,22 @@ class AnsibleCompletionProvider implements vscode.CompletionItemProvider {
     const lineText = doc.lineAt(pos.line).text;
     const prefix = lineText.slice(0, pos.character);
     const lines = docLines(doc);
+    const isSpace = ctx.triggerKind === vscode.CompletionTriggerKind.TriggerCharacter && ctx.triggerCharacter === ' ';
+
+    // 0) roles: `roles:` entries, include_role `name:` / `tasks_from:`, meta dependencies
+    const rc = setting('suggestRoles', true) ? roleContext(lines, pos.line, prefix) : undefined;
+    if (rc) {
+      // Typing `- ` opens a role entry and `role: ` expects a value; a space elsewhere doesn't.
+      if (isSpace && rc.kind === 'roleKeyword') return undefined;
+      return roleCompletions(doc, pos, rc);
+    }
 
     // 1) value position: `state: |` → choices of the option
     const val = valueTokenBeforeCursor(prefix);
     if (val) {
       return this.valueCompletions(lines, pos, val.key, val.keyCol, val.dashCol, val.valueStart);
     }
-    if (ctx.triggerKind === vscode.CompletionTriggerKind.TriggerCharacter && ctx.triggerCharacter === ' ') return undefined;
+    if (isSpace) return undefined;
 
     // 2) key position
     const tok = keyTokenBeforeCursor(prefix);
@@ -187,7 +296,7 @@ class AnsibleCompletionProvider implements vscode.CompletionItemProvider {
         items.push(item);
       }
       // Bare module names → expand to the FQCN (e.g. typing `copy` offers ansible.builtin.copy)
-      if (cfg().get<boolean>('suggestShortNames') ?? true) {
+      if (setting('suggestShortNames', true)) {
         for (const coll of index.allCollections()) {
           const preload = coll.fqcn === 'ansible.builtin' || coll.modules;
           if (!preload) continue;
@@ -201,7 +310,7 @@ class AnsibleCompletionProvider implements vscode.CompletionItemProvider {
         }
       }
       // Task keywords (name, when, register, ...)
-      if (cfg().get<boolean>('suggestTaskKeywords') ?? true) {
+      if (setting('suggestTaskKeywords', true)) {
         for (const [kw, desc] of Object.entries(TASK_KEYWORDS)) {
           if (siblings.has(kw)) continue;
           const item = new vscode.CompletionItem(kw, vscode.CompletionItemKind.Keyword);
@@ -270,6 +379,8 @@ class AnsibleCompletionProvider implements vscode.CompletionItemProvider {
       const d = await docs.get(mod);
       if (d) item.documentation = moduleMarkdown(mod, d, true);
     }
+    const role: RoleInfo | undefined = (item as any).roleInfo;
+    if (role) item.documentation = roleMarkdown(role);
     return item;
   }
 
@@ -336,6 +447,105 @@ class AnsibleCompletionProvider implements vscode.CompletionItemProvider {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Role completion
+// ---------------------------------------------------------------------------
+
+function docPath(doc: vscode.TextDocument): string | undefined {
+  return doc.uri.scheme === 'untitled' ? undefined : doc.uri.fsPath;
+}
+
+function roleCompletions(doc: vscode.TextDocument, pos: vscode.Position, rc: RoleContext): vscode.CompletionList {
+  const lineText = doc.lineAt(pos.line).text;
+  // Replace the whole token, including anything after the cursor.
+  const after = (rc.value ? /^[^\s'"#]*/ : /^[A-Za-z0-9_.]*/).exec(lineText.slice(pos.character))![0];
+  const hasColonAfter = !rc.value && lineText.slice(pos.character + after.length).startsWith(':');
+  const range = new vscode.Range(pos.line, rc.start, pos.line, pos.character + after.length);
+  const items: vscode.CompletionItem[] = [];
+
+  if (rc.kind === 'roleKeyword') {
+    for (const [kw, desc] of Object.entries(ROLE_KEYWORDS)) {
+      if (rc.siblings.has(kw) || (kw === 'role' && rc.siblings.has('name'))) continue;
+      const item = new vscode.CompletionItem(kw, vscode.CompletionItemKind.Keyword);
+      item.detail = 'role keyword';
+      item.documentation = desc;
+      item.insertText = hasColonAfter ? kw : `${kw}: `;
+      item.range = range;
+      item.sortText = `${kw === 'role' ? '0' : '1'}_${kw}`;
+      items.push(item);
+    }
+    return new vscode.CompletionList(items, false);
+  }
+
+  if (rc.kind === 'roleFile') {
+    const role = rc.role ? roles.resolve(rc.role, docPath(doc)) : undefined;
+    if (!role) return new vscode.CompletionList([], false);
+    for (const f of roles.entryFiles(role, rc.folder)) {
+      const item = new vscode.CompletionItem({ label: f, description: `${rc.folder}/${f}.yml` }, vscode.CompletionItemKind.File);
+      item.range = range;
+      items.push(item);
+    }
+    return new vscode.CompletionList(items, false);
+  }
+
+  // Role names. At `- |` a pick inserts `role: <name>` so keywords can follow.
+  const prefix = rc.asKey && !hasColonAfter ? 'role: ' : '';
+  const retrigger: vscode.Command = { title: 'suggest', command: CMD_RETRIGGER };
+  const parts = rc.token.split('.');
+  const add = (role: RoleInfo, sort: string) => {
+    const item = new vscode.CompletionItem({ label: role.name, description: roleSourceLabel(role) }, vscode.CompletionItemKind.Module);
+    item.insertText = prefix + role.name;
+    item.filterText = role.name;
+    item.range = range;
+    item.sortText = `${sort}_${role.name}`;
+    (item as any).roleInfo = role;
+    items.push(item);
+  };
+  // Standalone roles always show: Galaxy role names like `geerlingguy.docker` contain a dot too.
+  for (const role of roles.forDocument(docPath(doc))) add(role, role.source === 'playbook' ? '0' : '1');
+
+  // Collection roles drill down like modules: `acme.` → `acme.infra.` → `acme.infra.base`
+  const byNs = roles.roleCollections();
+  if (parts.length === 1) {
+    for (const [ns, colls] of byNs) {
+      const item = new vscode.CompletionItem({ label: ns, description: `roles in ${colls.size} collection${colls.size === 1 ? '' : 's'}` }, vscode.CompletionItemKind.Folder);
+      item.insertText = `${prefix}${ns}.`;
+      item.filterText = ns;
+      item.range = range;
+      item.sortText = `2_${ns}`;
+      item.command = retrigger;
+      items.push(item);
+    }
+  } else if (parts.length === 2) {
+    for (const coll of byNs.get(parts[0]) ?? []) {
+      const fqcn = `${parts[0]}.${coll}`;
+      const item = new vscode.CompletionItem({ label: fqcn, description: `${roles.collectionRolesIn(fqcn).length} roles` }, vscode.CompletionItemKind.Folder);
+      item.insertText = `${prefix}${fqcn}.`;
+      item.filterText = fqcn;
+      item.range = range;
+      item.sortText = `2_${fqcn}`;
+      item.command = retrigger;
+      items.push(item);
+    }
+  } else {
+    for (const role of roles.collectionRolesIn(`${parts[0]}.${parts[1]}`)) add(role, '0');
+  }
+
+  if (rc.asKey && !roles.forDocument(docPath(doc)).length && !byNs.size) {
+    const item = new vscode.CompletionItem('role', vscode.CompletionItemKind.Keyword);
+    item.insertText = hasColonAfter ? 'role' : 'role: ';
+    item.range = range;
+    items.push(item);
+  }
+  return new vscode.CompletionList(items, false);
+}
+
+function roleSourceLabel(role: RoleInfo): string {
+  if (role.source === 'collection') return `collection ${role.collection}${role.version ? ` v${role.version}` : ''}`;
+  const where = role.source === 'playbook' ? 'project' : 'roles_path';
+  return role.version ? `${where} v${role.version}` : where;
+}
+
 function optionSnippet(opt: OptionDoc, childIndent: string): vscode.SnippetString {
   const s = new vscode.SnippetString();
   s.appendText(`${opt.name}:`);
@@ -372,7 +582,7 @@ async function moduleInserted(fqcn: string): Promise<void> {
   const editor = vscode.window.activeTextEditor;
   if (!editor) return;
   const mod = await index.resolveModule(fqcn);
-  const insertRequired = cfg().get<boolean>('insertRequiredOptions') ?? true;
+  const insertRequired = setting('insertRequiredOptions', true);
   if (mod && insertRequired) {
     const d = await docs.get(mod);
     const required = d ? Object.values(d.options).filter((o) => o.required) : [];
@@ -404,7 +614,7 @@ class AnsibleInlineProvider implements vscode.InlineCompletionItemProvider {
     _ctx: vscode.InlineCompletionContext,
     token: vscode.CancellationToken,
   ): Promise<vscode.InlineCompletionItem[] | undefined> {
-    if (!(cfg().get<boolean>('inlineSuggestions') ?? true) || !isActiveFor(doc)) return undefined;
+    if (!setting('inlineSuggestions', true) || !isActiveFor(doc)) return undefined;
     await ready;
     const ghost = await planGhost(
       docLines(doc),
@@ -429,6 +639,15 @@ class AnsibleHoverProvider implements vscode.HoverProvider {
   async provideHover(doc: vscode.TextDocument, pos: vscode.Position): Promise<vscode.Hover | undefined> {
     if (!isActiveFor(doc)) return undefined;
     await ready;
+    const ref = roleReferenceAt(docLines(doc), pos.line, pos.character);
+    if (ref) {
+      const role = ref.kind === 'role' ? roles.resolve(ref.name, docPath(doc)) : ref.role ? roles.resolve(ref.role, docPath(doc)) : undefined;
+      if (!role) return undefined;
+      const r = new vscode.Range(pos.line, ref.start, pos.line, ref.end);
+      if (ref.kind === 'role') return new vscode.Hover(roleMarkdown(role), r);
+      const file = roles.entryFile(role, ref.folder, ref.file);
+      return new vscode.Hover(file ? `\`${vscode.workspace.asRelativePath(file)}\`` : `$(warning) No \`${ref.folder}/${ref.file}.yml\` in role ${role.name}`, r);
+    }
     const range = doc.getWordRangeAtPosition(pos, /[A-Za-z0-9_.]+/);
     if (!range) return undefined;
     const word = doc.getText(range);
@@ -456,9 +675,47 @@ class AnsibleHoverProvider implements vscode.HoverProvider {
   }
 }
 
+class RoleDefinitionProvider implements vscode.DefinitionProvider {
+  async provideDefinition(doc: vscode.TextDocument, pos: vscode.Position): Promise<vscode.Definition | vscode.LocationLink[] | undefined> {
+    if (!isActiveFor(doc)) return undefined;
+    await ready;
+    const ref = roleReferenceAt(docLines(doc), pos.line, pos.character);
+    if (!ref) return undefined;
+    const role = roles.resolve(ref.kind === 'role' ? ref.name : (ref.role ?? ''), docPath(doc));
+    if (!role) return undefined;
+    const target = ref.kind === 'role' ? roles.mainFile(role) : roles.entryFile(role, ref.folder, ref.file);
+    if (!target) return undefined;
+    return [
+      {
+        originSelectionRange: new vscode.Range(pos.line, ref.start, pos.line, ref.end),
+        targetUri: vscode.Uri.file(target),
+        targetRange: new vscode.Range(0, 0, 0, 0),
+      },
+    ];
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Markdown rendering
 // ---------------------------------------------------------------------------
+
+function roleMarkdown(role: RoleInfo): vscode.MarkdownString {
+  const d = roles.details(role);
+  const md = new vscode.MarkdownString(undefined, true);
+  md.appendMarkdown(`**${role.name}** _role_`);
+  if (d.description) md.appendMarkdown(` — ${d.description}`);
+  md.appendMarkdown('\n\n');
+  const opts = Object.values(d.options);
+  const required = opts.filter((o) => o.required).map((o) => `\`${o.name}\``);
+  if (required.length) md.appendMarkdown(`**Required variables:** ${required.join(', ')}\n\n`);
+  const optional = opts.filter((o) => !o.required).map((o) => `\`${o.name}\``);
+  if (optional.length) md.appendMarkdown(`**Variables:** ${optional.slice(0, 40).join(', ')}${optional.length > 40 ? ', …' : ''}\n\n`);
+  if (d.dependencies.length) md.appendMarkdown(`**Depends on:** ${d.dependencies.map((x) => `\`${x}\``).join(', ')}\n\n`);
+  const facts = [roleSourceLabel(role), d.author ? `by ${d.author}` : ''].filter(Boolean).join(' · ');
+  md.appendMarkdown(`_${facts}_ · \`${vscode.workspace.asRelativePath(role.root)}\``);
+  if (role.collection) md.appendMarkdown(` · [Galaxy](${galaxyUrl(role.name)})`);
+  return md;
+}
 
 function moduleMarkdown(mod: ModuleInfo, d: ModuleDoc | undefined, compact: boolean): vscode.MarkdownString {
   const md = new vscode.MarkdownString(undefined, true);
@@ -531,6 +788,47 @@ async function insertModuleCommand(): Promise<void> {
     { placeHolder: 'Collection' },
   );
   if (picked) await pickModule(picked.coll);
+}
+
+function rolePickItems(doc?: vscode.TextDocument) {
+  const local = roles.forDocument(doc && docPath(doc));
+  const seen = new Set(local.map((r) => r.root));
+  return [...local, ...roles.all().filter((r) => !seen.has(r.root))].map((r) => ({
+    label: r.name,
+    description: roleSourceLabel(r),
+    detail: roles.details(r).description,
+    role: r,
+  }));
+}
+
+async function showRolesCommand(): Promise<void> {
+  await ready;
+  const items = rolePickItems(vscode.window.activeTextEditor?.document);
+  const picked = await vscode.window.showQuickPick(items, { placeHolder: `${items.length} roles — pick one to open it`, matchOnDescription: true, matchOnDetail: true });
+  if (picked) await vscode.window.showTextDocument(vscode.Uri.file(roles.mainFile(picked.role)));
+}
+
+/** In a `roles:` list inserts `role: <name>`; anywhere else an include_role task. */
+async function insertRoleCommand(): Promise<void> {
+  await ready;
+  const editor = vscode.window.activeTextEditor;
+  if (!editor || !isActiveFor(editor.document)) {
+    await showRolesCommand();
+    return;
+  }
+  const picked = await vscode.window.showQuickPick(rolePickItems(editor.document), { placeHolder: 'Role', matchOnDescription: true, matchOnDetail: true });
+  if (!picked) return;
+  const pos = editor.selection.active;
+  const prefix = editor.document.lineAt(pos.line).text.slice(0, pos.character);
+  const rc = roleContext(docLines(editor.document), pos.line, prefix);
+  const name = picked.role.name;
+  if (rc?.kind === 'roleName') {
+    const range = new vscode.Range(pos.line, rc.start, pos.line, pos.character);
+    await editor.edit((b) => b.replace(range, (rc.asKey ? 'role: ' : '') + name));
+    return;
+  }
+  const indent = ' '.repeat(pos.character + indentUnit(editor.document));
+  await editor.edit((b) => b.insert(pos, `ansible.builtin.include_role:\n${indent}name: ${name}`));
 }
 
 async function pickModule(coll: CollectionInfo): Promise<void> {

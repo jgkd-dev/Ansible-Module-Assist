@@ -1,0 +1,6 @@
+galaxy_info:
+  author: ops
+  description: Fallback description
+dependencies:
+  - common
+  - role: acme.infra.base

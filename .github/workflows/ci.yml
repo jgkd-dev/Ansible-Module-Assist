@@ -44,7 +44,7 @@ jobs:
       - name: Build .vsix
         run: |
           node scripts/set-repository.mjs
-          npx vsce package --no-dependencies
+          npx vsce package --no-dependencies --out "assistable-$(node -p 'require("./package.json").version').vsix"
 
       - uses: actions/upload-artifact@v4
         with:

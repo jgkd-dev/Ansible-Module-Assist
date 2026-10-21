@@ -1,0 +1,5 @@
+- hosts: all
+  tasks:
+    - ansible.builtin.include_role:
+        name: web
+        tasks_from: install
