@@ -10,6 +10,8 @@ import {
   looksLikeAnsible,
   roleContext,
   roleReferenceAt,
+  roleVarsBlock,
+  childValue,
 } from '../src/context';
 import { ModuleIndex } from '../src/indexer';
 import { RoleIndex } from '../src/roles';
@@ -133,7 +135,7 @@ const playbook = `- hosts: firewall
   const play = '- hosts: all\n  roles:\n';
   await test('new entry in roles: is a role name inserted as `role:`', () => {
     const { rc } = rcAt(play + '    - we|');
-    assert.deepEqual(rc, { kind: 'roleName', start: 6, token: 'we', value: false, asKey: true });
+    assert.deepEqual(rc, { kind: 'roleName', start: 6, token: 'we', value: false, asKey: true, entry: true, keyCol: 6 });
   });
   await test('role: / name: values in roles: and dependencies:', () => {
     assert.equal(rcAt(play + '    - role: acme.|').rc?.kind, 'roleName');
@@ -149,7 +151,7 @@ const playbook = `- hosts: firewall
   });
   await test('include_role / import_role name and tasks_from', () => {
     const t = '- hosts: all\n  tasks:\n    - ansible.builtin.include_role:\n        name: web\n';
-    assert.deepEqual(rcAt('- hosts: all\n  tasks:\n    - import_role:\n        name: |').rc, { kind: 'roleName', start: 14, token: '', value: true, asKey: false });
+    assert.deepEqual(rcAt('- hosts: all\n  tasks:\n    - import_role:\n        name: |').rc, { kind: 'roleName', start: 14, token: '', value: true, asKey: false, entry: false, keyCol: 8 });
     const f = rcAt(t + '        tasks_from: ins|').rc;
     assert.deepEqual(f, { kind: 'roleFile', start: 20, token: 'ins', value: true, folder: 'tasks', role: 'web' });
     assert.equal(rcAt(t + '        vars_from: |').rc?.kind, 'roleFile');
@@ -216,12 +218,107 @@ const playbook = `- hosts: firewall
     const d = roleIndex.details(roleIndex.resolve('web', path.join(fx, 'site.yml'))!);
     assert.equal(d.description, 'Installs the `nginx` web server', 'argument_specs short_description wins over galaxy_info');
     assert.equal(d.author, 'ops');
-    assert.equal(d.options.web_port.required, true);
-    assert.equal(d.options.web_port.type, 'int');
-    assert.deepEqual(Object.keys(d.options.web_tls.suboptions!), ['cert'], 'nested `options:` become suboptions');
     assert.deepEqual(d.dependencies, ['common', 'acme.infra.base']);
     assert.equal(roleIndex.details(roleIndex.resolve('acme.infra.base')!).description, 'Base hardening');
-    assert.deepEqual(roleIndex.details(roleIndex.resolve('db', path.join(fx, 'site.yml'))!).options, {});
+  });
+
+  console.log('role variables');
+  await test('childValue reads a direct child only', () => {
+    const lines = ['- include_role:', '    name: web', '    apply:', '      name: nested', '    tasks_from: "install.yml"'];
+    assert.equal(childValue(lines, 0, 'name'), 'web');
+    assert.equal(childValue(lines, 0, 'tasks_from'), 'install.yml');
+    assert.equal(childValue(lines, 2, 'name'), 'nested');
+    assert.equal(childValue(lines, 0, 'missing'), undefined);
+  });
+  await test('roleVarsBlock: vars of a roles: entry and of include_role / import_role', () => {
+    const p = ['- hosts: all', '  roles:', '    - role: web', '      tags: [x]', '      vars:', '        web_port: 80', '    - name: db', '      vars:'];
+    assert.deepEqual(roleVarsBlock(p, 4), { role: 'web', entryPoint: 'main' });
+    assert.deepEqual(roleVarsBlock(p, 7), { role: 'db', entryPoint: 'main' });
+    const t = [
+      '- hosts: all',
+      '  vars:',
+      '    play_var: 1',
+      '  tasks:',
+      '    - name: install web',
+      '      vars:',
+      '        x: 1',
+      '      ansible.builtin.include_role:',
+      '        name: web',
+      '        tasks_from: install.yml',
+      '    - import_role:',
+      '        name: db',
+      '      vars:',
+      '    - ansible.builtin.debug:',
+      '      vars:',
+    ];
+    assert.deepEqual(roleVarsBlock(t, 5), { role: 'web', entryPoint: 'install' }, 'vars before include_role, tasks_from sets the entry point');
+    assert.deepEqual(roleVarsBlock(t, 12), { role: 'db', entryPoint: 'main' });
+    assert.equal(roleVarsBlock(t, 1), undefined, 'play vars');
+    assert.equal(roleVarsBlock(t, 14), undefined, 'vars of a task that isn\'t include_role');
+    assert.equal(roleVarsBlock(t, 0), undefined, 'not a vars line');
+  });
+  const site = path.join(fx, 'site.yml');
+  await test('spec from argument_specs, per entry point', () => {
+    const web = roleIndex.resolve('web', site)!;
+    const main = roleIndex.spec(web)!;
+    assert.equal(main.source, 'argument_specs');
+    assert.deepEqual(Object.keys(main.options), ['web_port', 'web_tls']);
+    assert.equal(main.options.web_port.required, true);
+    assert.equal(main.options.web_port.type, 'int');
+    assert.deepEqual(Object.keys(main.options.web_tls.suboptions!), ['cert'], 'nested `options:` become suboptions');
+    const install = roleIndex.spec(web, 'install')!;
+    assert.equal(install.shortDescription, 'Installs packages only');
+    assert.deepEqual(install.options.install_method.choices, ['package', 'source']);
+    // No spec for this entry point: fall back to defaults/main.yml
+    assert.equal(roleIndex.spec(web, 'nope')?.source, 'defaults');
+  });
+  await test('spec falls back to defaults/main.yml: types, no _private, no templated defaults', () => {
+    const d = roleIndex.spec(roleIndex.resolve('db', site)!)!;
+    assert.equal(d.source, 'defaults');
+    assert.deepEqual(Object.keys(d.options), ['db_name', 'db_port', 'db_enabled', 'db_users', 'db_settings', 'db_url', 'db_password', 'db_secret']);
+    assert.deepEqual(
+      Object.values(d.options).map((o) => o.type),
+      ['str', 'int', 'bool', 'list', 'dict', 'str', 'str', undefined],
+    );
+    assert.ok(Object.values(d.options).every((o) => !o.required));
+    assert.equal(d.options.db_port.default, 5432);
+    assert.equal(d.options.db_url.default, undefined);
+  });
+  await test('defaults/main/ folder is merged in name order', () => {
+    const d = roleIndex.spec(roleIndex.resolve('common')!)!;
+    assert.deepEqual(Object.keys(d.options).sort(), ['common_a', 'common_b', 'common_shared']);
+    assert.equal(d.options.common_shared.default, 'from_b');
+  });
+  await test('no spec for a role with neither', () => {
+    assert.equal(roleIndex.spec(roleIndex.resolve('acme.infra.base')!), undefined);
+  });
+
+  const roleLookup = (lines: string[]) => async (key: string, keyLine?: number) => {
+    if (key !== 'vars' || keyLine === undefined) return undefined;
+    const b = roleVarsBlock(lines, keyLine);
+    const role = b && roleIndex.resolve(b.role, site);
+    const spec = role && roleIndex.spec(role, b.entryPoint);
+    return spec && { fqcn: role.name, description: spec.description, options: spec.options, source: spec.source };
+  };
+  const rg = async (text: string) => {
+    const lines = text.split('\n');
+    const lineNo = lines.findIndex((l) => l.includes('|'));
+    const col = lines[lineNo].indexOf('|');
+    lines[lineNo] = lines[lineNo].replace('|', '');
+    return planGhost(lines, lineNo, col, roleLookup(lines));
+  };
+  await test('ghost: end of `vars:` line -> first required role variable', async () => {
+    assert.equal((await rg(play + '    - role: web\n      vars:|'))?.text, '\n        web_port: ');
+  });
+  await test('ghost: include_role entry point decides which variables', async () => {
+    const t = '- hosts: all\n  tasks:\n    - ansible.builtin.include_role:\n        name: web\n        tasks_from: install\n      vars:\n        |';
+    assert.equal((await rg(t))?.text, 'install_method: ');
+    assert.equal((await rg(t.replace('|', 'install_method: s|')))?.text, 'source');
+  });
+  await test('ghost: no role variable hints for play vars or defaults-only roles on an empty line', async () => {
+    assert.equal(await rg('- hosts: all\n  vars:|'), undefined);
+    assert.equal(await rg(play + '    - role: db\n      vars:\n        |'), undefined, 'nothing is required');
+    assert.equal((await rg(play + '    - role: db\n      vars:\n        db_p|'))?.text, 'db_port: ', 'partial names still complete');
   });
 
   console.log('settings');

@@ -22,7 +22,8 @@ export interface ModuleDoc {
   options: Record<string, OptionDoc>;
   examples?: string;
   deprecated?: string;
-  source: 'ansible-doc' | 'file';
+  /** `argument_specs` / `defaults`: a role's variables, presented like module options. */
+  source: 'ansible-doc' | 'file' | 'argument_specs' | 'defaults';
 }
 
 /** Loads full module documentation, preferring `ansible-doc` (which resolves doc fragments). */

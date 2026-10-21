@@ -1,6 +1,6 @@
 # Plan: role support
 
-Status: phase 1 implemented (ships as 0.4.0) · phase 2 next (0.5.0)
+Status: phases 1 (0.4.0) and 2 (0.5.0) implemented · phase 3 not started
 
 Assistable completes modules today. Its role support is limited to one thing: files under `roles/` are treated as Ansible, so `roles/x/tasks/main.yml` gets module suggestions. This plan adds roles as a second kind of thing it indexes, completes, documents and navigates.
 
@@ -154,7 +154,13 @@ Cover discovery order and precedence, every `roleContext` position (including mi
 
 - **Settings and command IDs move to `assistable.*` in phase 1** (see the rename section). The extension ID does not change.
 
-## Open questions
+## Decided in phase 2
 
-1. **Defaults fallback noise.** Some roles have dozens of internal defaults (`_role_private_thing`). Should keys that start with `_` be hidden, and should the fallback be off by default?
-2. **Legacy role params.** Should variables be suggested as direct keys in a `roles:` entry (`- role: web\n  port: 80`)? Ansible still accepts that form, but `vars:` is the recommended one. One option is to suggest variables only under `vars:`, and give a hover hint for the direct form.
+- **Defaults fallback is on, `_private` keys hidden.** Roles without argument specs still get suggestions from `defaults/main.yml` (or a `defaults/main/` folder). Keys starting with `_` are left out, every variable is optional, and the hover says it comes from defaults, so possibly internal ones are labelled as such. Templated defaults (`{{ … }}`) aren't offered as values, and Ansible's `!unsafe` / `!vault` tags are understood.
+- **Variables only under `vars:`.** Direct keys in a `roles:` entry (`- role: web\n  port: 80`) aren't suggested. That's the legacy form, and its keys share a namespace with role keywords.
+- **Entry points:** for include_role / import_role, `tasks_from:` selects the argument_specs entry point (as Ansible's validation does). A role with argument specs but none for that entry point falls back to defaults.
+- **Required insertion** applies to roles picked in a `roles:` list and to **Insert role…** (both in a list and as a new include_role task). Picking a role name in an existing include_role's `name:` doesn't insert anything, because its `vars:` belongs to the task, outside the block being edited.
+
+## How phase 2 is wired
+
+`blockDoc()` in `extension.ts` returns the docs for whatever block the cursor is in. That's a module's options, or, for a `vars:` that `roleVarsBlock()` (in `context.ts`) ties to a role, `RoleIndex.spec()` shown as a `ModuleDoc`. Completion, value choices, hover and ghost text all go through it, so role variables reuse the module-option code. `planGhost`'s lookup now also gets the line of the block's key, so it can tell whose `vars:` it's in.

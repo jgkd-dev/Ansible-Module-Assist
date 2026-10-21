@@ -1,1 +1,11 @@
 db_name: app
+db_port: 5432
+db_enabled: true
+db_users: []
+db_settings: {}
+db_url: "postgres://{{ db_name }}"
+_db_private: internal
+db_password: !unsafe "p@ss{{"
+db_secret: !vault |
+  $ANSIBLE_VAULT;1.1;AES256
+  6162

@@ -161,10 +161,7 @@ export function siblingKeys(lines: string[], lineNo: number, keyCol: number): Se
 /** The scalar value of sibling `key` in the block that contains `lineNo` (quotes and comments stripped). */
 export function siblingValue(lines: string[], lineNo: number, keyCol: number, key: string): string | undefined {
   for (const i of siblingLines(lines, lineNo, keyCol)) {
-    if (analyseLine(lines[i]).key !== key) continue;
-    const m = /^\s*(?:-\s+)?[A-Za-z0-9_.\-]+\s*:\s*(.*)$/.exec(lines[i]);
-    const v = m?.[1].replace(/\s+#.*$/, '').trim().replace(/^(['"])(.*)\1$/, '$2');
-    return v || undefined;
+    if (analyseLine(lines[i]).key === key) return valueOf(lines[i]);
   }
   return undefined;
 }
@@ -268,8 +265,12 @@ export const ROLE_KEYWORDS: Record<string, string> = {
 };
 
 export type RoleContext =
-  /** A role name. `asKey`: the cursor is at `- |`, so a pick should insert `role: <name>`. */
-  | { kind: 'roleName'; start: number; token: string; value: boolean; asKey: boolean }
+  /**
+   * A role name. `asKey`: the cursor is at `- |`, so a pick should insert `role: <name>`.
+   * `entry`: it's an entry of a `roles:` / `dependencies:` list whose keys start at `keyCol`
+   * (as opposed to include_role's `name:`).
+   */
+  | { kind: 'roleName'; start: number; token: string; value: boolean; asKey: boolean; entry: boolean; keyCol: number }
   /** A file inside a role, e.g. `tasks_from: |`. `role` is the sibling `name:`, if set. */
   | { kind: 'roleFile'; start: number; token: string; value: true; folder: string; role?: string }
   /** A key inside an entry of a `roles:` list. */
@@ -287,9 +288,9 @@ export function roleContext(lines: string[], lineNo: number, prefix: string): Ro
     const quote = /^['"]/.test(val.value) ? 1 : 0;
     const start = val.valueStart + quote;
     const token = val.value.slice(quote);
-    if ((val.key === 'role' || val.key === 'name') && inRoleList(enc)) return { kind: 'roleName', start, token, value: true, asKey: false };
+    if ((val.key === 'role' || val.key === 'name') && inRoleList(enc)) return { kind: 'roleName', start, token, value: true, asKey: false, entry: true, keyCol: val.keyCol };
     if (enc.mapParentKey && INCLUDE_ROLE_KEYS.has(enc.mapParentKey)) {
-      if (val.key === 'name') return { kind: 'roleName', start, token, value: true, asKey: false };
+      if (val.key === 'name') return { kind: 'roleName', start, token, value: true, asKey: false, entry: false, keyCol: val.keyCol };
       const folder = ROLE_FILE_KEYS[val.key];
       if (folder) return { kind: 'roleFile', start, token, value: true, folder, role: siblingValue(lines, lineNo, val.keyCol, 'name') };
     }
@@ -299,7 +300,7 @@ export function roleContext(lines: string[], lineNo: number, prefix: string): Ro
   if (!tok) return undefined;
   const enc = findEnclosing(lines, lineNo, tok.start, tok.dashCol);
   if (!inRoleList(enc)) return undefined;
-  if (tok.dashCol !== undefined) return { kind: 'roleName', start: tok.start, token: tok.token, value: false, asKey: true };
+  if (tok.dashCol !== undefined) return { kind: 'roleName', start: tok.start, token: tok.token, value: false, asKey: true, entry: true, keyCol: tok.start };
   return { kind: 'roleKeyword', start: tok.start, token: tok.token, value: false, siblings: siblingKeys(lines, lineNo, tok.start) };
 }
 
@@ -322,6 +323,65 @@ export function roleReferenceAt(lines: string[], lineNo: number, col: number): R
     if (!rc.value && !/^\s*(#.*)?$/.test(text.slice(end))) return undefined;
     if (rc.kind === 'roleFile') return { kind: 'file', role: rc.role, folder: rc.folder, file: rc.token, start, end };
     return { kind: 'role', name: rc.token, start, end };
+  }
+  return undefined;
+}
+
+/** The scalar value of `key` among the direct children of the block opened at `parentLine`. */
+export function childValue(lines: string[], parentLine: number, key: string): string | undefined {
+  const parentCol = analyseLine(lines[parentLine]).keyCol;
+  let childCol: number | undefined;
+  for (let i = parentLine + 1; i < lines.length; i++) {
+    const li = analyseLine(lines[i]);
+    if (li.keyCol < 0) continue;
+    if (li.keyCol <= parentCol) break;
+    childCol ??= li.keyCol;
+    if (li.keyCol === childCol && li.key === key) return valueOf(lines[i]);
+  }
+  return undefined;
+}
+
+/** The scalar value of a `key: value` line, quotes and trailing comment stripped. */
+function valueOf(line: string): string | undefined {
+  const m = /^\s*(?:-\s+)?[A-Za-z0-9_.\-]+\s*:\s*(.*)$/.exec(line);
+  const v = m?.[1].replace(/\s+#.*$/, '').trim().replace(/^(['"])(.*)\1$/, '$2');
+  return v || undefined;
+}
+
+export interface RoleVarsBlock {
+  role: string;
+  /** argument_specs entry point: `main`, or the `tasks_from` file for include_role / import_role. */
+  entryPoint: string;
+}
+
+/**
+ * If the `vars:` key on `varsLine` passes variables to a role, which role:
+ *   roles:                       - ansible.builtin.include_role:
+ *     - role: web                    name: web
+ *       vars:          or            tasks_from: install
+ *         web_port: 80             vars:
+ *                                    web_port: 80
+ */
+export function roleVarsBlock(lines: string[], varsLine: number): RoleVarsBlock | undefined {
+  const li = analyseLine(lines[varsLine] ?? '');
+  if (li.key !== 'vars' || !li.opensBlock) return undefined;
+  const enc = findEnclosing(lines, varsLine, li.keyCol, li.dashCol);
+  if (!enc.inListItem) return undefined;
+  if (inRoleList(enc)) {
+    const role = siblingValue(lines, varsLine, li.keyCol, 'role') ?? siblingValue(lines, varsLine, li.keyCol, 'name');
+    return role ? { role, entryPoint: 'main' } : undefined;
+  }
+  // A task: find its include_role / import_role key, then that block's `name:`.
+  const itemLine = enc.itemLine ?? varsLine;
+  for (let i = itemLine; i < lines.length; i++) {
+    const s = analyseLine(lines[i]);
+    if (s.keyCol >= 0 && s.keyCol < li.keyCol) break;
+    if (i > itemLine && s.keyCol === li.keyCol && s.dashCol !== undefined) break; // next task
+    if (s.keyCol !== li.keyCol || !s.key || !INCLUDE_ROLE_KEYS.has(s.key)) continue;
+    const role = childValue(lines, i, 'name');
+    if (!role) return undefined;
+    const from = childValue(lines, i, 'tasks_from');
+    return { role, entryPoint: from ? from.replace(/\.ya?ml$/, '') : 'main' };
   }
   return undefined;
 }
